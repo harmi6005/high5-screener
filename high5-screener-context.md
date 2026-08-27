@@ -1,9 +1,57 @@
-# 5일신고가 · 3일신저가 자동매매 봇 (high5-screener) - 전체 컨텍스트 요약 v3
+# 5일신고가 · 3일신저가 자동매매 봇 (high5-screener) - 전체 컨텍스트 요약 v4
 
-새 채팅창에서 이 파일을 업로드하고 "이 프로젝트 이어서 작업할게, v3 컨텍스트 파악해줘"라고
+새 채팅창에서 이 파일을 업로드하고 "이 프로젝트 이어서 작업할게, v4 컨텍스트 파악해줘"라고
 하면 바로 이어서 작업 가능. **터틀 스크리너(turtle-screener)와는 완전히 별도의 봇/저장소.**
 
 **코드 수정 규칙: 항상 부분수정이 아닌 전체 파일 재작성 방식으로 진행할 것.**
+
+---
+
+## v3 → v4 변경 이력 (이번 세션) — 터틀식 텔레그램 명령어 전체 도입
+
+터틀 스크리너의 모든 명령어(buy/sell/list/추적시작/추적종료/추적확인/명령어확인)를
+high5 구조에 맞게 응용해서 추가함. **응답속도는 5분 폴링으로 채택** (터틀의 웹훅
+방식은 Cloudflare Worker+GitHub PAT 인프라가 필요하고 PAT 노출이라는 미해결 보안
+이슈가 있었음 — high5는 자동매매가 메인이라 명령어는 보조 기능이므로 5분 폴링으로
+충분하다고 판단, 간단하고 안전한 쪽 채택).
+
+1. **신규 `bot_commands.py`**: 터틀의 동명 파일을 응용, 명령어 공통 처리 로직
+   - `buy 코드 매수가`: 수동 포지션 등록. 시장 자동판별(`detect_market`: KR=6자리숫자,
+     COIN=빗썸 KRW 마켓 실존 확인, 나머지=US), ATR(10일) 자동계산 후 하드스탑 계산
+     (`calc_hard_stop` 재사용), 4자리 거래번호 발급 — 자동 진입 파이프라인과 동일한
+     계산 로직을 그대로 재사용해서 일관성 유지
+   - `sell 거래번호 [매도가]`: 청산 처리. 매도가 생략 시 `fetch_current_price`로
+     현재가 자동조회. `status='closed_manual'`로 표시(자동청산 `closed`와 구분,
+     `position_check.py`는 `status=='active'`만 감시하므로 두 상태 모두 자연히 제외됨).
+     휩쏘 이력에도 승/패 기록
+   - `list`: 보유 포지션 목록 (매수가/현재가/손익률/하드스탑/최고가)
+   - `코드 추적시작` / `추적종료`(`추적해제`/`추적중지`): **자동 진입 파이프라인과
+     완전히 별개인** 수동 감시목록(`tracked.csv`) 등록/해제
+   - `추적확인`(`추적목록`): 추적목록 종목들을 그 순간 실시간 재조회해서
+     5일고가선 근접도, 3일저가선, 진입가능/관심/관찰중 상태를 보여줌
+   - `명령어확인`(`명령어 확인`/`도움말`/`help`/`/help`): 전체 사용법 안내
+   - `dispatch(text, pos_df, tracked_df, hist_df)`: 한 줄 명령어 처리
+   - `dispatch_lines(...)`: 여러 줄 명령어를 줄 단위로 각각 처리 후 답장을 합쳐서
+     발송 (터틀에서 겪었던 "여러 줄 중 첫 줄만 처리되는" 버그를 처음부터 방지,
+     실제 테스트로 3줄 동시 명령이 모두 처리됨을 확인함)
+2. **`common.py`에 명령어 처리용 공용 함수 추가**:
+   - `detect_market(code_raw)`: 코드만 보고 KR/US/COIN 자동 판별
+   - `fetch_ohlc(market, code, days)`: 시장별 최근 OHLC 히스토리 조회 (buy/추적확인용)
+   - `fetch_current_price(market, code)`: 현재가만 가볍게 조회 (sell 매도가 생략 시)
+3. **신규 `storage.py`에 `tracked.csv` 로드/세이브 추가**: `TRACKED_COLUMNS =
+   ['market','code','name']`, `load_tracked()`, `save_tracked(df)`
+4. **신규 스크립트 `scripts/telegram_listener.py`**: 5분마다 `getUpdates` 폴링,
+   `telegram_offset.txt`로 중복처리 방지, 등록된 `chat_id`가 아닌 메시지는 무시,
+   `dispatch_lines`로 처리 후 결과를 `positions.csv`/`tracked.csv`/`trade_history.csv`에 반영
+5. **신규 워크플로우 `.github/workflows/telegram_listener.yml`** (5분마다)
+
+### 검증한 것 (합성 데이터, 네트워크 우회)
+- `buy` → ATR/하드스탑 계산, 포지션 등록 정상
+- `list` → 보유 포지션 표시 정상
+- `sell`(매도가 생략) → 현재가 자동조회 후 손익률 계산, `status=closed_manual`,
+  휩쏘 이력(`loss`) 기록 정상
+- `추적시작`/`추적종료`/`명령어확인` 정상
+- 3줄 동시 `추적시작` 명령 → 3개 모두 처리됨 (다중 라인 버그 방지 확인)
 
 ---
 
@@ -85,13 +133,17 @@
 
 ```
 high5-screener/
-├── common.py                    # 진입판정, 채널청산판정, 하드스탑계산, 휩쏘필터, 추세표시, 텔레그램발송
-├── storage.py                   # positions.csv / watch.csv 공용 로드-세이브 헬퍼
+├── common.py                    # 진입판정, 채널청산판정, 하드스탑계산, 휩쏘필터, 추세표시,
+│                                 # 시장판별/시세조회(명령어용), 텔레그램발송
+├── storage.py                   # positions.csv / watch.csv / tracked.csv 공용 로드-세이브 헬퍼
+├── bot_commands.py               # [v4 신규] 텔레그램 명령어 공통 처리 (buy/sell/list/추적/도움말)
 ├── requirements.txt
 ├── data/
 │   ├── positions.csv            # 전체 시장 포지션 통합 (market 컬럼으로 구분)
-│   ├── watch.csv                # 전체 시장 관심종목 통합 (market 컬럼으로 구분)
-│   └── trade_history.csv        # 휩쏘필터용 거래이력 (market+code 기준)
+│   ├── watch.csv                # 전체 시장 관심종목 통합 (market 컬럼으로 구분, 자동 파이프라인용)
+│   ├── tracked.csv              # [v4 신규] 수동 추적목록 (추적시작/추적종료로 관리, 자동과 별개)
+│   ├── trade_history.csv        # 휩쏘필터용 거래이력 (market+code 기준)
+│   └── telegram_offset.txt      # [v4 신규] 텔레그램 폴링 오프셋
 ├── scripts/
 │   ├── full_scan_korea.py       # 국장 전체스캔 (KOSPI, 가격필터 없음)
 │   ├── full_scan_us.py          # 미장 전체스캔 (S&P500)
@@ -100,14 +152,16 @@ high5-screener/
 │   ├── recheck_us.py            # 미장 5분 재확인 (장중에만)
 │   ├── recheck_bithumb.py       # 코인 5분 재확인 (24시간)
 │   ├── position_check.py        # 포지션 청산체크(3일신저가+하드스탑) + 5분 요약(추세+거리% 포함)
-│   └── watchlist_check.py       # [v3 신규] 관심종목 5분 무조건 현황요약 (🎯, 터틀 집중추적종목 응용)
+│   ├── watchlist_check.py       # 관심종목 5분 무조건 현황요약 (🎯, 터틀 집중추적종목 응용)
+│   └── telegram_listener.py     # [v4 신규] 텔레그램 명령어 폴링 리스너 (5분마다)
 └── .github/workflows/
     ├── full_scan_korea.yml      # 04:00, 11:00 UTC
     ├── full_scan_us.yml         # 19:00, 23:00 UTC
     ├── full_scan_bithumb.yml    # 6시간마다
     ├── recheck.yml              # */5 * * * * (국장/미장/코인 3개 스크립트)
     ├── position_check.yml       # */5 * * * *
-    └── watchlist_check.yml      # [v3 신규] */5 * * * *
+    ├── watchlist_check.yml      # */5 * * * *
+    └── telegram_listener.yml    # [v4 신규] */5 * * * *
 ```
 
 ---
@@ -178,3 +232,27 @@ high5-screener/
    숫자 조정 필요 여부 판단
 5. 휩쏘 필터가 실제 거래 사이클(진입→청산→다음 진입 스킵)에서 잘 작동하는지 확인
 6. 국장 KRX 조회 실패 시 재시도(3회, 15초 간격) 로직이 실제 장애 상황에서 잘 동작하는지
+7. **[v4]** `buy`/`sell`/`list`/`추적시작`/`추적종료`/`추적확인`/`명령어확인`
+   명령어가 실제 텔레그램에서 5분 내로 정상 응답하는지 확인 (합성 데이터로는
+   검증했으나 실제 네트워크/실거래 데이터로는 미확인 상태)
+8. **[v4]** `telegram_offset.txt` 기반 중복처리 방지가 실제 GitHub Actions
+   동시실행 상황에서도 잘 작동하는지 확인 (여러 워크플로우가 동시에 커밋을
+   시도하면 git push 충돌 가능성 있음 — 발생 시 재시도 로직 추가 검토)
+
+---
+
+## 저장소/봇 정보 (실제 배포된 것, 확인됨)
+
+- GitHub: `harmi6005/high5-screener` (Public)
+- 시크릿: `HIGH5_TELEGRAM_BOT_TOKEN`, `HIGH5_TELEGRAM_CHAT_ID` 등록 완료
+- 배포 중 겪은 실수와 해결 (다음에 비슷한 실수 방지용 기록):
+  1. zip을 풀어서 생긴 폴더 **자체**를 통째로 드래그 업로드 → 저장소 안에
+     `high5-screener/high5-screener/...`처럼 폴더가 한 겹 더 생기는 문제 발생
+     → 폴더를 열어서 **내용물**을 드래그해야 함
+  2. `.github` 폴더가 점(`.`)으로 시작하는 숨김 폴더라서 Windows 탐색기 기본
+     설정에서 드래그 시 누락됨 → 탐색기 "보기" 탭에서 "숨김 항목" 체크 후 다시
+     업로드하거나, GitHub 웹의 "Create new file"에서 파일명에
+     `.github/workflows/파일명.yml`처럼 슬래시 포함 경로를 직접 입력해서
+     한 파일씩 생성하는 방법으로 우회 가능
+  3. `.github/workflows`가 비어있으면 Actions 탭이 "Get started with GitHub
+     Actions" 추천 템플릿 화면만 보여줌 (워크플로우 인식 자체가 안 된 상태라는 신호)

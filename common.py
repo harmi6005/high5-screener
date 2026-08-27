@@ -95,6 +95,62 @@ def calc_hard_stop(entry_price, atr_entry):
     return round(entry_price - dist, 4)
 
 
+# ===== 시장 판별 / 시세 조회 (텔레그램 명령어 처리용 공용 함수) =====
+
+def detect_market(code_raw):
+    """코드 문자열만 보고 시장을 자동 판별.
+    KR: 6자리 숫자 / COIN: 빗썸 KRW 마켓에 실제 존재하는 티커 / 나머지: US"""
+    code = code_raw.strip().upper()
+    if code.isdigit() and len(code) == 6:
+        return 'KR', code
+    try:
+        url = f"https://api.bithumb.com/public/ticker/{code}_KRW"
+        res = requests.get(url, timeout=5).json()
+        if res.get('status') == '0000':
+            return 'COIN', code
+    except Exception:
+        pass
+    return 'US', code
+
+
+def fetch_ohlc(market, code, days=40):
+    """시장별 최근 OHLC 히스토리 조회 (buy/추적확인 등 명령어 처리용 공용 함수)."""
+    import FinanceDataReader as fdr
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    try:
+        if market == 'KR':
+            end = datetime.today()
+            start = end - timedelta(days=days + 20)
+            df = fdr.DataReader(str(code).zfill(6), start, end)
+            return df if not df.empty else None
+        elif market == 'US':
+            data = yf.download(code, period=f'{days + 20}d', auto_adjust=True, progress=False)
+            return data if not data.empty else None
+        elif market == 'COIN':
+            url = f"https://api.bithumb.com/public/candlestick/{code}_KRW/24h"
+            res = requests.get(url, timeout=10).json()
+            if res.get('status') != '0000':
+                return None
+            raw = res['data']
+            df = pd.DataFrame(raw, columns=['Time', 'Open', 'Close', 'High', 'Low', 'Volume'])
+            df['Time'] = pd.to_datetime(df['Time'], unit='ms')
+            df = df.set_index('Time')
+            for col in ['Open', 'Close', 'High', 'Low', 'Volume']:
+                df[col] = df[col].astype(float)
+            return df.tail(days)
+    except Exception:
+        return None
+    return None
+
+
+def fetch_current_price(market, code):
+    df = fetch_ohlc(market, code, days=5)
+    if df is None or df.empty:
+        return None
+    return float(df.iloc[-1]['Close'])
+
+
 def notify_telegram(message: str):
     token = os.environ.get('HIGH5_TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('HIGH5_TELEGRAM_CHAT_ID')
@@ -168,8 +224,7 @@ def fmt_pct(v):
 
 def trend_arrow(current, previous):
     """직전 값 대비 상승/하락/보합 표시 (터틀 스크리너와 동일 스타일).
-    비교 대상 값(previous)이 없거나(최초) 숫자로 변환 안 되면 🆕 반환.
-    가격 뿐 아니라 임의의 두 숫자(예: 채널청산선) 비교에도 재사용 가능."""
+    비교 대상 값(previous)이 없거나(최초) 숫자로 변환 안 되면 🆕 반환."""
     if previous is None or previous == '' or (isinstance(previous, float) and pd.isna(previous)):
         return "🆕"
     try:
