@@ -38,6 +38,13 @@ def get_updates(token, offset):
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     params = {'offset': offset, 'timeout': 5}
     res = requests.get(url, params=params, timeout=15).json()
+    if not res.get('ok', True):
+        desc = res.get('description', '')
+        if 'webhook' in desc.lower():
+            print(f"웹훅이 활성화되어 있어 폴링을 건너뜁니다: {desc}")
+            return []
+        print(f"getUpdates 실패: {desc}")
+        return []
     return res.get('result', [])
 
 

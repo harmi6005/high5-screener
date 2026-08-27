@@ -1,9 +1,80 @@
-# 5일신고가 · 3일신저가 자동매매 봇 (high5-screener) - 전체 컨텍스트 요약 v4
+# 5일신고가 · 3일신저가 자동매매 봇 (high5-screener) - 전체 컨텍스트 요약 v5
 
-새 채팅창에서 이 파일을 업로드하고 "이 프로젝트 이어서 작업할게, v4 컨텍스트 파악해줘"라고
+새 채팅창에서 이 파일을 업로드하고 "이 프로젝트 이어서 작업할게, v5 컨텍스트 파악해줘"라고
 하면 바로 이어서 작업 가능. **터틀 스크리너(turtle-screener)와는 완전히 별도의 봇/저장소.**
 
 **코드 수정 규칙: 항상 부분수정이 아닌 전체 파일 재작성 방식으로 진행할 것.**
+
+---
+
+## v4 → v5 변경 이력 (이번 세션) — 즉시응답 웹훅 구축 (터틀의 미해결 숙제 해결)
+
+터틀은 Cloudflare Worker + GitHub PAT로 즉시응답 웹훅을 만들었지만, "대시보드
+Quick Edit로는 Secret 환경변수가 계속 undefined로 나온다"는 문제를 하드코딩으로
+우회한 채 미해결로 남겨뒀음. 이번엔 **wrangler CLI로 Secret을 등록하는 방식**으로
+원인을 회피하고, 코드에는 민감정보를 전혀 하드코딩하지 않도록 처음부터 설계함.
+
+### 중요한 제약사항 (설계에 반영됨)
+**텔레그램은 웹훅과 폴링(`getUpdates`)을 동시에 못 씀.** 웹훅이 활성화된 상태에서
+`getUpdates`를 호출하면 에러가 남. 따라서:
+- 웹훅이 켜져 있으면 `telegram_listener.py`(폴링)는 자동으로 조용히 스킵됨
+  (에러를 잡아서 그냥 "웹훅이 활성화되어 있어 폴링을 건너뜁니다" 로그만 남김)
+- 나중에 웹훅을 해제하면 폴링이 별도 코드 수정 없이 자동으로 되살아남
+- 즉 "웹훅 우선, 폴링은 웹훅을 안 쓰기로 하면 자동으로 대체되는 예비 수단"
+
+### 신규 구성요소
+1. **`cloudflare-worker/index.js`**: 텔레그램 웹훅 수신 → `chat_id` 검증 →
+   GitHub `repository_dispatch` API 호출. `GITHUB_PAT`, `GITHUB_OWNER`,
+   `GITHUB_REPO`, `ALLOWED_CHAT_ID` 전부 `env.*`로만 참조, 코드에 하드코딩 없음.
+   (이 파일은 high5-screener 저장소용이 아니라 **별도의 Cloudflare Worker
+   프로젝트**로 배포하는 코드 — GitHub Actions에서는 실행되지 않음)
+2. **`cloudflare-worker/wrangler.toml`**: Worker 배포 설정. 민감정보는 여기에도
+   적지 않고 `wrangler secret put`으로만 등록
+3. **신규 스크립트 `scripts/webhook_handler.py`**: `repository_dispatch`로 전달된
+   명령어 텍스트(`COMMAND_TEXT` 환경변수) 1건을 즉시 `dispatch_lines`로 처리
+4. **신규 워크플로우 `.github/workflows/telegram_webhook.yml`**:
+   `repository_dispatch` (type: `telegram_message`)로 트리거
+5. **`telegram_listener.py` 수정**: `getUpdates` 응답이 "webhook is active" 류
+   에러면 예외 없이 조용히 빈 리스트 반환하도록 방어 로직 추가
+
+### 배포 절차 (사용자가 직접 진행, Wrangler CLI 방식)
+1. Node.js 설치 확인 (`node -v`) — 없으면 nodejs.org에서 설치
+2. `npm install -g wrangler`
+3. `wrangler login` (브라우저로 Cloudflare 계정 인증)
+4. `cloudflare-worker` 폴더에서 `wrangler deploy` 실행 전에 시크릿 4개 등록:
+   ```
+   wrangler secret put GITHUB_PAT
+   wrangler secret put GITHUB_OWNER
+   wrangler secret put GITHUB_REPO
+   wrangler secret put ALLOWED_CHAT_ID
+   ```
+   - `GITHUB_PAT`: GitHub에서 **fine-grained PAT** 발급, 이 저장소(high5-screener)
+     만 대상으로, 권한은 **Contents: Read and write** (repository_dispatch에 필요)
+   - `GITHUB_OWNER`: 예) `harmi6005`
+   - `GITHUB_REPO`: 예) `high5-screener`
+   - `ALLOWED_CHAT_ID`: 텔레그램 chat_id (기존 시크릿과 동일 값)
+5. `wrangler deploy` → 배포 URL(`https://high5-telegram-webhook.[계정].workers.dev`) 확인
+6. curl로 Worker 자체가 살아있는지 먼저 확인 (텔레그램 연결 전 독립 테스트):
+   ```
+   curl -X POST https://high5-telegram-webhook.[계정].workers.dev \
+     -H "Content-Type: application/json" \
+     -d '{"message":{"chat":{"id":"실제챗아이디"},"text":"명령어확인"}}'
+   ```
+   → `GitHub API status: 204`가 나와야 정상 (실패하면 텔레그램 연결 전에 먼저 여기서 디버깅)
+7. 텔레그램 웹훅 등록:
+   ```
+   https://api.telegram.org/bot{토큰}/setWebhook?url=https://high5-telegram-webhook.[계정].workers.dev
+   ```
+8. `https://api.telegram.org/bot{토큰}/getWebhookInfo`로 정상 등록 확인
+9. 실제 텔레그램에서 `명령어확인` 보내서 몇 초 내로 답장 오는지 확인
+
+### 다음 세션에서 확인해야 할 것 (v5 추가분)
+1. **wrangler secret put이 이번엔 정상적으로 반영되는지 확인** (터틀의 반복 실패 지점)
+2. curl 직접 테스트에서 `GitHub API status: 204`가 나오는지 (안 나오면 PAT 권한/이름 확인)
+3. 텔레그램 실제 메시지로 몇 초 내 응답 오는지 확인
+4. fine-grained PAT 만료 주기(발급 시 설정한 기간) 도래 시 재발급 필요 — 만료일 메모해둘 것
+5. 웹훅 등록 후 `telegram_listener.py`(폴링) 워크플로우가 에러 없이 조용히 스킵되는지 확인
+   (Actions 로그에 "웹훅이 활성화되어 있어 폴링을 건너뜁니다" 정상 출력되는지)
 
 ---
 
@@ -136,14 +207,17 @@ high5-screener/
 ├── common.py                    # 진입판정, 채널청산판정, 하드스탑계산, 휩쏘필터, 추세표시,
 │                                 # 시장판별/시세조회(명령어용), 텔레그램발송
 ├── storage.py                   # positions.csv / watch.csv / tracked.csv 공용 로드-세이브 헬퍼
-├── bot_commands.py               # [v4 신규] 텔레그램 명령어 공통 처리 (buy/sell/list/추적/도움말)
+├── bot_commands.py               # 텔레그램 명령어 공통 처리 (buy/sell/list/추적/도움말)
 ├── requirements.txt
+├── cloudflare-worker/            # [v5 신규] high5-screener 저장소와 별개로 배포하는 웹훅 브릿지
+│   ├── index.js                  # 텔레그램 웹훅 → GitHub repository_dispatch 호출
+│   └── wrangler.toml             # 배포 설정 (민감정보는 여기 없음, wrangler secret put으로만)
 ├── data/
 │   ├── positions.csv            # 전체 시장 포지션 통합 (market 컬럼으로 구분)
 │   ├── watch.csv                # 전체 시장 관심종목 통합 (market 컬럼으로 구분, 자동 파이프라인용)
-│   ├── tracked.csv              # [v4 신규] 수동 추적목록 (추적시작/추적종료로 관리, 자동과 별개)
+│   ├── tracked.csv              # 수동 추적목록 (추적시작/추적종료로 관리, 자동과 별개)
 │   ├── trade_history.csv        # 휩쏘필터용 거래이력 (market+code 기준)
-│   └── telegram_offset.txt      # [v4 신규] 텔레그램 폴링 오프셋
+│   └── telegram_offset.txt      # 텔레그램 폴링 오프셋
 ├── scripts/
 │   ├── full_scan_korea.py       # 국장 전체스캔 (KOSPI, 가격필터 없음)
 │   ├── full_scan_us.py          # 미장 전체스캔 (S&P500)
@@ -153,7 +227,8 @@ high5-screener/
 │   ├── recheck_bithumb.py       # 코인 5분 재확인 (24시간)
 │   ├── position_check.py        # 포지션 청산체크(3일신저가+하드스탑) + 5분 요약(추세+거리% 포함)
 │   ├── watchlist_check.py       # 관심종목 5분 무조건 현황요약 (🎯, 터틀 집중추적종목 응용)
-│   └── telegram_listener.py     # [v4 신규] 텔레그램 명령어 폴링 리스너 (5분마다)
+│   ├── telegram_listener.py     # 텔레그램 명령어 폴링 리스너 (5분마다, 웹훅 활성 시 자동 스킵)
+│   └── webhook_handler.py       # [v5 신규] 웹훅으로 받은 명령어 즉시 처리
 └── .github/workflows/
     ├── full_scan_korea.yml      # 04:00, 11:00 UTC
     ├── full_scan_us.yml         # 19:00, 23:00 UTC
@@ -161,7 +236,8 @@ high5-screener/
     ├── recheck.yml              # */5 * * * * (국장/미장/코인 3개 스크립트)
     ├── position_check.yml       # */5 * * * *
     ├── watchlist_check.yml      # */5 * * * *
-    └── telegram_listener.yml    # [v4 신규] */5 * * * *
+    ├── telegram_listener.yml    # */5 * * * * (웹훅 활성 시 사실상 no-op)
+    └── telegram_webhook.yml     # [v5 신규] repository_dispatch (즉시)
 ```
 
 ---
