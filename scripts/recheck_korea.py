@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
-"""국내 관심종목 5일신고가 재확인 (GitHub Actions에서 5분마다 자동 실행, 장중에만 동작)
-watch.csv의 KR 종목만 재조회해서, 장중에 5일 신고가를 돌파하면 즉시 포지션을 등록한다."""
+"""국내 관심종목 재확인 (GitHub Actions에서 5분마다 자동 실행, 장중에만 동작)
+
+5일신고가 돌파가 재확인(장중 재조회)에서도 유지되면 '확정'으로 승격 — 이때
+휩쏘 필터(직전 거래가 수익이었으면 스킵)가 적용됨. '확정' 상태였던 종목이
+3일 신저가를 이탈하면 '확정이탈'로 전환하고 휩쏘 학습용 이력에 기록.
+⚠️ 여전히 알림만 하며, 실제 매수/매도는 텔레그램 buy/sell 명령으로만 이뤄짐."""
 
 import sys
 import os
@@ -11,10 +15,9 @@ import FinanceDataReader as fdr
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from common import (ENTRY_PERIOD, WATCH_RATIO, MAX_CHASE_RATIO,
-                     check_high5_breakout, calc_hard_stop, notify_telegram, send_long_message,
-                     load_trade_history, save_trade_history, check_whipsaw)
-from storage import load_positions, save_positions, gen_position_id, already_holding, load_watch, save_watch_for_market
+from common import (MAX_CHASE_RATIO, check_high5_system, notify_telegram,
+                     load_trade_history, save_trade_history, check_whipsaw, record_trade_result)
+from storage import load_scan, save_scan_for_market
 
 MAX_WORKERS = 20
 MARKET_LABEL = 'KR'
@@ -30,15 +33,25 @@ def is_korea_market_open():
 
 
 def recheck_one(row, start, end):
-    code, name = row['code'], row['name']
+    code, name, orig_signal = row['code'], row['name'], row['signal']
     try:
         df = fdr.DataReader(str(code).zfill(6), start, end)
         if df.empty:
             return None
-        res = check_high5_breakout(df, ENTRY_PERIOD, WATCH_RATIO)
+        res = check_high5_system(df)
         if not res:
             return None
-        return {'code': code, 'name': name, **res}
+
+        if orig_signal == '확정':
+            status = '확정이탈' if res['exit_signal'] else '확정유지'
+        elif res['fresh_entry_signal']:
+            chase_ratio = (res['close'] - res['n_high']) / res['n_high']
+            status = '스킵(추격과다)' if chase_ratio > MAX_CHASE_RATIO else '확정_candidate'
+        else:
+            status = '유지' if res['watch_signal'] else '탈락'
+
+        return {'code': code, 'name': name, 'status': status,
+                'entry_price': row.get('entry_price', ''), **res}
     except Exception:
         return None
 
@@ -48,13 +61,14 @@ if __name__ == "__main__":
         print("국내 장 시간이 아니라서 재확인을 건너뜁니다 (평일 09:00~15:30 KST).")
         sys.exit(0)
 
-    watch_df = load_watch()
-    target_rows = watch_df[watch_df['market'] == MARKET_LABEL].to_dict('records')
+    scan_df = load_scan()
+    prev_df = scan_df[scan_df['market'] == MARKET_LABEL].copy()
+    target_rows = prev_df[prev_df['signal'].isin(['관심', '확정'])].to_dict('records')
     if not target_rows:
-        print("현재 관심종목이 없습니다.")
+        print("현재 관심/확정 종목이 없습니다.")
         sys.exit(0)
 
-    print(f"관심종목 {len(target_rows)}개 재확인 중...")
+    print(f"관심/확정 종목 {len(target_rows)}개 재확인 중...")
     end = datetime.today()
     start = end - timedelta(days=120)
 
@@ -66,61 +80,62 @@ if __name__ == "__main__":
             if r:
                 results.append(r)
 
-    pos_df = load_positions()
     hist_df = load_trade_history(HIST_PATH)
     hist_changed = False
-
-    entry_rows = []
-    still_watch_rows = []
-    skip_chase = 0
-    skip_whipsaw = 0
+    confirm_rows = []
+    exit_rows = []
+    whipsaw_skip_count = 0
 
     for r in results:
-        code = r['code']
-        if r['fresh_entry_signal']:
-            if already_holding(pos_df, MARKET_LABEL, code):
-                continue
-            chase_ratio = (r['close'] - r['n_high']) / r['n_high']
-            if chase_ratio > MAX_CHASE_RATIO:
-                skip_chase += 1
-                continue
-            allowed, hist_df = check_whipsaw(hist_df, MARKET_LABEL, code, r['n_high'], r['close'], r['atr'])
+        if r['status'] == '확정_candidate':
+            allowed, hist_df = check_whipsaw(hist_df, MARKET_LABEL, r['code'], r['n_high'], r['close'], r['atr'])
             hist_changed = True
-            if not allowed:
-                skip_whipsaw += 1
-                continue
+            if allowed:
+                r['status'] = '확정'
+                confirm_rows.append(r)
+            else:
+                r['status'] = '관심'
+                whipsaw_skip_count += 1
+        elif r['status'] == '확정이탈':
+            exit_rows.append(r)
 
-            pid = gen_position_id(pos_df)
-            hard_stop = calc_hard_stop(r['close'], r['atr'])
-            new_pos = {'position_id': pid, 'market': MARKET_LABEL, 'code': code, 'name': r['name'],
-                       'entry_price': r['close'], 'atr_entry': r['atr'],
-                       'hard_stop_price': hard_stop, 'highest_price': r['close'],
-                       'last_milestone': 0, 'last_price': r['close'], 'last_n_low': '',
-                       'status': 'active', 'entry_date': end.strftime('%Y-%m-%d')}
-            pos_df = pd.concat([pos_df, pd.DataFrame([new_pos])], ignore_index=True)
-            entry_rows.append({**r, 'position_id': pid, 'hard_stop_price': hard_stop})
-        elif r['watch_signal']:
-            still_watch_rows.append(r)
-        # 그 외(탈락)는 watch에서 자동 제외됨
+    confirm_df = pd.DataFrame(confirm_rows)
+    exit_df = pd.DataFrame(exit_rows)
+    skip_cnt = len([r for r in results if r['status'] == '스킵(추격과다)'])
+    print(f"[국장 재확인] 확정 {len(confirm_df)}개 / 확정이탈 {len(exit_df)}개 / "
+          f"휩쏘스킵 {whipsaw_skip_count}개 / 스킵(추격과다) {skip_cnt}개")
 
-    save_positions(pos_df)
+    for r in results:
+        code, status = r['code'], r['status']
+        mask = (prev_df['code'] == code)
+        if status == '확정':
+            prev_df.loc[mask, 'signal'] = '확정'
+            prev_df.loc[mask, 'entry_price'] = r['close']
+        elif status in ('탈락', '스킵(추격과다)'):
+            prev_df.loc[mask, 'signal'] = '탈락'
+        elif status == '확정이탈':
+            prev_df.loc[mask, 'signal'] = '확정이탈'
+            entry_price = r.get('entry_price', '')
+            try:
+                entry_price = float(entry_price)
+                hist_df = record_trade_result(hist_df, MARKET_LABEL, code, entry_price, r['close'])
+                hist_changed = True
+            except (ValueError, TypeError):
+                pass
+
+    save_scan_for_market(MARKET_LABEL, prev_df)
     if hist_changed:
         save_trade_history(hist_df, HIST_PATH)
 
-    still_watch_df = pd.DataFrame(still_watch_rows)
-    save_watch_for_market(MARKET_LABEL, still_watch_df)
+    if not confirm_df.empty:
+        lines = [f"- {r['name']}({r['code']})\n"
+                 f"  현재가 {r['close']} / 진입가(돌파) {r['n_high']} / 참고 3일저가 {r['n_low']}\n"
+                 f"  괴리율 {(r['close']-r['n_high'])/r['n_high']*100:.2f}%\n"
+                 f"  buy {r['code']} {r['close']} 명령으로 등록할 수 있어요."
+                 for _, r in confirm_df.iterrows()]
+        notify_telegram("[국장] 확정 전환 종목! (매수 검토)\n" + "\n".join(lines))
 
-    print(f"[국장 재확인] 신규진입 {len(entry_rows)}개 / 관심유지 {len(still_watch_df)}개 / "
-          f"스킵(추격과다) {skip_chase}개 / 스킵(휩쏘) {skip_whipsaw}개")
-
-    if entry_rows:
-        lines = [f"[국장 5일신고가] 장중 돌파! 신규 진입 {len(entry_rows)}건 (포지션 자동 등록됨)"]
-        for r in entry_rows:
-            lines.append(
-                f"- {r['name']}({r['code']}) [거래번호 {r['position_id']}]\n"
-                f"  진입가 {r['close']} / 5일고가 {r['n_high']}\n"
-                f"  청산: 3일 신저가 이탈 시 / 하드스탑 {r['hard_stop_price']}"
-            )
-        send_long_message("\n".join(lines))
-    else:
-        print("[국장 재확인] 신규 전환 없음 (무신호 알림은 생략)")
+    if not exit_df.empty:
+        lines = [f"- {r['name']}({r['code']})\n  현재가 {r['close']} / 3일저가(참고) {r['n_low']}"
+                 for _, r in exit_df.iterrows()]
+        notify_telegram("[국장] 확정이탈 종목! (보유 중이면 매도 검토)\n" + "\n".join(lines))

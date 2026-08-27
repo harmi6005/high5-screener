@@ -88,11 +88,38 @@ def check_channel_exit(df, exit_period=EXIT_PERIOD):
 
 
 def calc_hard_stop(entry_price, atr_entry):
-    """하이브리드 하드스탑: 1.5×ATR(10일)과 진입가 대비 -7% 중 더 타이트한(가까운) 쪽."""
+    """하이브리드 하드스탑: 1.5×ATR(10일)과 진입가 대비 -7% 중 더 타이트한(가까운) 쪽.
+    실제 보유종목(수동 buy로 등록된 것) 관리에만 사용 — 자동스캔 파이프라인에는 쓰지 않음."""
     atr_dist = ATR_MULTIPLIER * atr_entry
     pct_dist = entry_price * HARD_STOP_PCT
     dist = min(atr_dist, pct_dist)
     return round(entry_price - dist, 4)
+
+
+def check_high5_system(df):
+    """자동스캔/재확인 파이프라인 전용: 5일신고가(진입)와 3일신저가(청산) 판정을
+    한 번에 묶어서 반환한다 (터틀의 check_turtle_breakout이 entry_signal/exit_signal을
+    한 번에 반환하는 것과 동일한 인터페이스로 맞춤). 실제 보유종목 관리는 이 함수를
+    쓰지 않고 check_high5_breakout/check_channel_exit을 개별로 쓴다."""
+    entry_res = check_high5_breakout(df, ENTRY_PERIOD, WATCH_RATIO)
+    if not entry_res:
+        return None
+    exit_res = check_channel_exit(df, EXIT_PERIOD)
+    merged = dict(entry_res)
+    merged['exit_signal'] = bool(exit_res and exit_res['exit_signal'])
+    merged['n_low'] = exit_res['n_low'] if exit_res else None
+    return merged
+
+
+def pick_top_entry(df):
+    """진입 신호가 여러 개일 때, 초과율(=최근 방금 돌파한 정도)이 가장 작은
+    '가장 신선한 돌파' 1개만 골라서 알림 스팸을 방지한다 (터틀과 동일 철학)."""
+    entry_df = df[df['signal'] == '진입'].copy()
+    if entry_df.empty:
+        return None
+    entry_df['excess_ratio'] = (entry_df['close'] - entry_df['n_high']) / entry_df['n_high']
+    entry_df = entry_df.sort_values('excess_ratio', ascending=True)
+    return entry_df.iloc[0]
 
 
 # ===== 시장 판별 / 시세 조회 (텔레그램 명령어 처리용 공용 함수) =====

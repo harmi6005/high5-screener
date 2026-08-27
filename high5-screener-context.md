@@ -1,13 +1,137 @@
-# 5일신고가 · 3일신저가 자동매매 봇 (high5-screener) - 전체 컨텍스트 요약 v5
+# 5일신고가 · 3일신저가 자동매매 봇 (high5-screener) - 전체 컨텍스트 요약 v7
 
-새 채팅창에서 이 파일을 업로드하고 "이 프로젝트 이어서 작업할게, v5 컨텍스트 파악해줘"라고
+새 채팅창에서 이 파일을 업로드하고 "이 프로젝트 이어서 작업할게, v7 컨텍스트 파악해줘"라고
 하면 바로 이어서 작업 가능. **터틀 스크리너(turtle-screener)와는 완전히 별도의 봇/저장소.**
 
 **코드 수정 규칙: 항상 부분수정이 아닌 전체 파일 재작성 방식으로 진행할 것.**
 
 ---
 
-## v4 → v5 변경 이력 (이번 세션) — 즉시응답 웹훅 구축 (터틀의 미해결 숙제 해결)
+## ⚠️ v7 최중요 변경 — "완전자동매매"라는 애초 설계가 틀렸음을 발견, 터틀 방식(알림전용)으로 전면 수정
+
+v1~v6까지는 "신호가 뜨면 시스템이 알아서 매수/매도까지 다 한다(완전자동)"는 전제로
+만들었는데, 사용자가 "지금 내가 하는 터틀 역시 자동매매는 아니다"라고 알려줘서
+**터틀의 실제 소스코드(`turtle-screener-source-1.md`)를 처음부터 다시 대조**했고,
+터틀은 애초에 이런 구조였음이 확인됨:
+
+- 전체스캔/재확인은 **알림만** 함 (holdings.csv에 아무것도 안 씀)
+- 실제 매수는 사용자가 텔레그램으로 **`buy` 명령을 직접 입력**해야만 등록됨
+- 손절선 이탈해도 **자동으로 안 팖** — "매도 검토" 알림만 가고 `status='stop_hit'`,
+  사용자가 `sell` 명령을 쳐야 비로소 `closed_manual`로 종료됨
+- 휩쏘 필터(직전 거래 승/패 학습)는 **자동스캔 파이프라인 자체의 신호 상태**
+  (관심→확정→확정이탈)로만 판단하고 기록함. 실제 보유종목(holdings)의 매수/매도와는
+  완전히 무관 (bot_commands.py가 trade_history를 아예 import도 안 함)
+
+이걸 몰랐던 상태로 v1~v6에서 만든 "신호 뜨면 자동 매수, 3일신저가/하드스탑 걸리면
+자동 매도" 로직은 전부 터틀과 다른 설계였고, 이번에 전면 재설계함.
+
+### 3가지 데이터가 완전히 분리됨 (사용자가 지적한 "집중추적과 보유종목 분리" 요청의 최종 해법)
+
+| 파일 | 역할 | 누가 채우나 | 자동매매 여부 |
+|---|---|---|---|
+| `scan.csv` | 자동 전체스캔/재확인 신호 캐시 (진입/관심/확정/확정이탈/탈락) | `full_scan_*.py`/`recheck_*.py` | **알림만, 매수 절대 안 함** |
+| `positions.csv` | 실제 보유종목 | 텔레그램 `buy`/`sell` 명령 (사용자가 직접) | 감시(위험도 체크)만 자동, 매매 실행은 수동 |
+| `tracked.csv` | 수동 추적목록 | 텔레그램 `코드 추적시작`/`추적종료` | 상태변화 감시만 자동, 매매 없음 |
+
+세 파일은 서로 완전히 독립적. `scan.csv`에서 '진입'이 떠도 `positions.csv`엔
+아무 일도 안 일어남 — 사용자가 알림을 보고 `buy 코드 가격`을 직접 쳐야만
+`positions.csv`에 등록됨.
+
+### full_scan_*.py / recheck_*.py 전면 재작성 (터틀과 동일한 상태머신)
+- `common.py`에 `check_high5_system(df)` 신설: 5일신고가(진입)+3일신저가(청산) 판정을
+  한 번에 묶어서 반환 (터틀의 `check_turtle_breakout`과 동일한 인터페이스)
+- `common.py`에 `pick_top_entry(df)` 신설: 진입신호가 여러 개면 초과율(방금 막 돌파한
+  정도)이 가장 작은 1개만 골라서 알림 (터틀과 동일 철학, 스팸 방지)
+- 신호 상태: 진입(신선돌파+추격필터통과, 알림) → 관심(근접) → 확정(재확인에서 재검증+
+  휩쏘필터 통과, "매수 검토" 알림) → 확정이탈(3일신저가 이탈, "매도 검토" 알림 + 휩쏘
+  이력 기록) → 탈락
+- 전체스캔이 재실행돼도 '확정' 상태였던 종목은 유지됨 (`storage.save_scan_for_market`이
+  기존 확정 종목을 새 결과에 없어도 보존 — 터틀 로직 그대로)
+- 알림 문구에 `buy {code} {price} 명령으로 등록할 수 있어요` 안내 추가 (사용자가
+  바로 복사해서 칠 수 있게)
+
+### position_check.py 전면 재작성 (터틀 holdings_check.py 방식)
+- **자동 청산 완전히 제거**. 3일신저가/하드스탑 이탈 시 `status='stop_hit'`으로
+  바뀌고 "매도 검토" 알림만 감 (1회, 상태가 바뀌었으니 반복 스팸 안 됨)
+- `status != 'closed_manual'`인 것 전부 계속 감시 (active + stop_hit 둘 다),
+  `sell` 명령이 들어와야 비로소 감시 종료
+- **trade_history(휩쏘 이력) 관련 코드 완전 제거** — 실제 보유종목 매매는
+  휩쏘 학습과 무관 (터틀과 동일)
+- 5분 무조건 요약(📦)에서 stop_hit 상태는 "🔴 손절확정 (매도대기)" 태그로 별도 표시
+
+### bot_commands.py 수정
+- `handle_sell`: `status != 'closed_manual'`인 것을 찾도록 수정 (stop_hit 상태도
+  sell로 찾아서 종료 가능해야 함 — 터틀이 v2 세션에서 겪었던 버그를 처음부터 방지)
+- `handle_list`: stop_hit 상태는 `[손절확정/매도대기]` 태그 추가 표시
+- `already_holding`(storage.py): `status != 'closed_manual'` 기준으로 변경
+  (stop_hit도 '아직 안 판' 상태라 중복 buy 방지 대상에 포함)
+
+### watchlist_check.py 수정
+- 데이터 소스를 `watch.csv`(폐지) → `scan.csv`(signal=='관심' 행)로 변경
+- 나머지(5분 무조건 요약, 추세표시)는 동일
+
+### 검증한 것 (합성 데이터)
+- `check_high5_system`: entry+exit 통합판정 정상 (fresh_entry_signal, exit_signal,
+  n_low 모두 한 dict에 포함됨)
+- `pick_top_entry`: 여러 진입신호 중 초과율 최솟값(가장 신선한 돌파)을 정확히 선택
+- `save_scan_for_market`: 확정종목 보존 + 탈락종목 제거 + 신규종목 추가가 동시에
+  일어나는 케이스 정상 동작
+- `list`/`sell`: stop_hit 상태도 `[손절확정/매도대기]`로 표시되고 sell 명령으로
+  정상 종료됨을 확인
+
+---
+
+## v6 변경 이력 (명령어를 터틀과 정확히 일치)
+
+v4에서 만든 명령어 세트가 터틀에 없는 한글 별칭(보유종목확인/포지션확인/관심종목확인 등)을
+임의로 추가한 상태였음. **터틀의 실제 소스코드(`bot_commands.py`)를 직접 대조**해서
+명령어 집합과 동작 방식을 정확히 일치시키고, 판정 기준만 5일신고가/3일신저가로 교체함.
+
+### 터틀과 다르게 되어있던 부분 (이번에 맞춤)
+- ❌ 제거: `목록`/`보유종목확인`/`포지션확인`/`포지션목록` 별칭 → 터틀처럼 **`list`만** 인식
+- ❌ 제거: `관심종목확인` 명령어 → 터틀에 없는 기능이라 삭제
+- ❌ 제거: sell 시 현재가 자동조회 → 터틀처럼 매도가 없으면 손익계산 없이 종료만
+  (v4에선 fetch_current_price로 자동조회했으나 터틀 소스엔 그런 로직이 없음)
+- ❌ 제거: 명령어 처리에서 휩쏘이력(trade_history) 갱신 → 터틀도 수동거래(buy/sell)는
+  자동 스캔의 휩쏘필터와 완전히 무관하게 동작함 (`bot_commands.py`가 애초에
+  trade_history를 import조차 안 함)
+- ✅ 추가: 터틀처럼 `/buy`, `/sell`, `/list`, `/help`처럼 앞에 슬래시 붙여도 인식
+  (`cmd = parts[0].lower().lstrip('/')`)
+- ✅ 추가: **신규 스크립트 `scripts/tracked_check.py`**: 터틀의 실제 watchlist_check.py
+  (감시목록 터틀신호 체크, 직전 상태와 다를 때만 알림)를 그대로 이식. 지금까진
+  `추적확인`을 직접 쳐야만 상태를 알 수 있었는데, 이제 **5분마다 자동으로 상태
+  변화(예: 관찰중→관심→진입)가 생기면 먼저 알림**이 옴 (터틀과 동일한 사용자 경험)
+- ✅ 신규 워크플로우 `.github/workflows/tracked_check.yml` (5분마다)
+- **`storage.py`**: `TRACKED_COLUMNS`를 `['market','code','name']`→`['code','market','status']`로
+  변경 (터틀 watchlist.csv의 `sys1_status`/`sys2_status`에 해당하는 단일 `status`
+  필드 추가, high5는 시스템이 하나뿐이라 컬럼도 하나만 필요)
+- **`bot_commands.py` 전체 재작성**: `dispatch()` 반환값을 터틀과 동일한
+  **6-튜플** `(pos_df, tracked_df, reply, is_long, pos_changed, tracked_changed)`로
+  단순화 (v4의 8-튜플에서 hist_df 관련 2개 제거)
+- **`telegram_listener.py`/`webhook_handler.py`**: 위 시그니처 변경에 맞춰 재작성,
+  trade_history 로드/세이브 코드 전부 제거
+
+### 검증한 것 (합성 데이터, 네트워크 우회)
+- `buy 005930 105` / `/buy 000660 200` (슬래시 포함) → 등록 정상, 문구가 터틀과 동일 톤
+- `list` → 터틀과 동일 문구("현재 감시 중인 거래:") 확인
+- `sell 거래번호` (매도가 생략) → 손익계산 없이 그냥 청산 (터틀과 동일 동작, v4의
+  자동조회 로직 제거됨을 확인)
+- `BTC 추적시작` → `추적확인` → 상태(관심/진입/청산/관찰중) 정상 표시
+- `명령어확인` / `/help` → 동일 도움말 출력
+- 3줄 동시 `추적시작` 명령 → 3개 모두 처리됨 (다중 라인 처리 유지 확인)
+
+### 다음 세션에서 확인해야 할 것 (v6 추가분)
+1. `tracked_check.py`가 실제로 상태 변화 시에만 알림을 보내고, 변화 없을 때는
+   조용한지 실운영에서 확인
+2. 웹훅(v5) 배포를 아직 진행 안 한 상태 — 사용자가 터미널 작업에 부담을 느껴
+   보류 중. 5분 폴링만으로 계속 운영할지, 나중에 재도전할지는 사용자 선택 사항
+3. `detect_market`의 COIN 판별(빗썸 API 조회)이 실제 배포 환경(GitHub Actions)에서
+   네트워크 제한 없이 정상 동작하는지 확인 (로컬 테스트 환경에서는 아웃바운드
+   제한으로 인해 항상 US로 폴백되는 것을 확인했으나 코드 자체는 정상)
+
+---
+
+## v4 → v5 변경 이력 (웹훅, 사용자가 진행 보류 중 — 아래 안내는 나중에 재도전 시 참고용)
 
 터틀은 Cloudflare Worker + GitHub PAT로 즉시응답 웹훅을 만들었지만, "대시보드
 Quick Edit로는 Secret 환경변수가 계속 undefined로 나온다"는 문제를 하드코딩으로
@@ -204,82 +328,110 @@ high5 구조에 맞게 응용해서 추가함. **응답속도는 5분 폴링으�
 
 ```
 high5-screener/
-├── common.py                    # 진입판정, 채널청산판정, 하드스탑계산, 휩쏘필터, 추세표시,
+├── common.py                    # 진입판정(check_high5_breakout), 채널청산판정(check_channel_exit),
+│                                 # 통합판정(check_high5_system, 자동스캔 전용), pick_top_entry,
+│                                 # 하드스탑계산(calc_hard_stop, 실제보유종목 전용), 휩쏘필터, 추세표시,
 │                                 # 시장판별/시세조회(명령어용), 텔레그램발송
-├── storage.py                   # positions.csv / watch.csv / tracked.csv 공용 로드-세이브 헬퍼
-├── bot_commands.py               # 텔레그램 명령어 공통 처리 (buy/sell/list/추적/도움말)
+├── storage.py                   # scan.csv / positions.csv / tracked.csv 완전분리 로드-세이브 헬퍼
+├── bot_commands.py               # 텔레그램 명령어 공통 처리 (터틀과 동일: buy/sell/list/추적/도움말)
 ├── requirements.txt
-├── cloudflare-worker/            # [v5 신규] high5-screener 저장소와 별개로 배포하는 웹훅 브릿지
-│   ├── index.js                  # 텔레그램 웹훅 → GitHub repository_dispatch 호출
-│   └── wrangler.toml             # 배포 설정 (민감정보는 여기 없음, wrangler secret put으로만)
+├── cloudflare-worker/            # high5-screener 저장소와 별개로 배포하는 웹훅 브릿지 (배포는 보류 중)
+│   ├── index.js
+│   └── wrangler.toml
 ├── data/
-│   ├── positions.csv            # 전체 시장 포지션 통합 (market 컬럼으로 구분)
-│   ├── watch.csv                # 전체 시장 관심종목 통합 (market 컬럼으로 구분, 자동 파이프라인용)
-│   ├── tracked.csv              # 수동 추적목록 (추적시작/추적종료로 관리, 자동과 별개)
-│   ├── trade_history.csv        # 휩쏘필터용 거래이력 (market+code 기준)
+│   ├── scan.csv                 # [v7] 자동스캔 신호 캐시 전용 (진입/관심/확정/확정이탈/탈락),
+│   │                             # market 컬럼으로 국장/미장/코인 통합. 알림만, 매매 절대 안 함
+│   ├── positions.csv            # 실제 보유종목 (buy 명령으로만 생성), market 컬럼으로 통합
+│   ├── tracked.csv              # 수동 추적목록 (추적시작/추적종료로 관리), code/market/status
+│   ├── trade_history.csv        # 휩쏘필터 이력 — scan.csv 파이프라인(확정/확정이탈) 전용,
+│   │                             # positions.csv(실제 매매)와는 완전히 무관
 │   └── telegram_offset.txt      # 텔레그램 폴링 오프셋
 ├── scripts/
-│   ├── full_scan_korea.py       # 국장 전체스캔 (KOSPI, 가격필터 없음)
-│   ├── full_scan_us.py          # 미장 전체스캔 (S&P500)
-│   ├── full_scan_bithumb.py     # 코인 전체스캔 (빗썸 KRW)
-│   ├── recheck_korea.py         # 국장 5분 재확인 (장중에만, 관심→진입 전환 감지)
-│   ├── recheck_us.py            # 미장 5분 재확인 (장중에만)
-│   ├── recheck_bithumb.py       # 코인 5분 재확인 (24시간)
-│   ├── position_check.py        # 포지션 청산체크(3일신저가+하드스탑) + 5분 요약(추세+거리% 포함)
-│   ├── watchlist_check.py       # 관심종목 5분 무조건 현황요약 (🎯, 터틀 집중추적종목 응용)
+│   ├── full_scan_korea.py       # [v7 재작성] 국장 전체스캔, 알림전용(자동매수 없음)
+│   ├── full_scan_us.py          # [v7 재작성] 미장 전체스캔, 알림전용
+│   ├── full_scan_bithumb.py     # [v7 재작성] 코인 전체스캔, 알림전용
+│   ├── recheck_korea.py         # [v7 재작성] 관심→확정→확정이탈 상태머신 + 휩쏘필터, 알림전용
+│   ├── recheck_us.py            # [v7 재작성] 상동
+│   ├── recheck_bithumb.py       # [v7 재작성] 상동 (24시간)
+│   ├── position_check.py        # [v7 재작성] 보유종목 감시, 자동청산 없음(알림만, status=stop_hit)
+│   ├── watchlist_check.py       # [v7 수정] scan.csv(signal=='관심') 기반 5분 무조건 현황요약 (🎯)
+│   ├── tracked_check.py         # 추적목록(수동) 상태변화 시에만 알림 (터틀 watchlist_check 응용)
 │   ├── telegram_listener.py     # 텔레그램 명령어 폴링 리스너 (5분마다, 웹훅 활성 시 자동 스킵)
-│   └── webhook_handler.py       # [v5 신규] 웹훅으로 받은 명령어 즉시 처리
+│   └── webhook_handler.py       # 웹훅으로 받은 명령어 즉시 처리 (웹훅 배포 시에만 트리거됨)
 └── .github/workflows/
     ├── full_scan_korea.yml      # 04:00, 11:00 UTC
     ├── full_scan_us.yml         # 19:00, 23:00 UTC
     ├── full_scan_bithumb.yml    # 6시간마다
     ├── recheck.yml              # */5 * * * * (국장/미장/코인 3개 스크립트)
-    ├── position_check.yml       # */5 * * * *
-    ├── watchlist_check.yml      # */5 * * * *
+    ├── position_check.yml       # */5 * * * * (data/positions.csv만 커밋)
+    ├── watchlist_check.yml      # */5 * * * * (data/scan.csv 커밋)
+    ├── tracked_check.yml        # */5 * * * *
     ├── telegram_listener.yml    # */5 * * * * (웹훅 활성 시 사실상 no-op)
-    └── telegram_webhook.yml     # [v5 신규] repository_dispatch (즉시)
+    └── telegram_webhook.yml     # repository_dispatch (즉시, 웹훅 배포해야 트리거됨)
 ```
 
 ---
 
-## 데이터 모델 (v3)
+## 데이터 모델 (v7)
 
-### `data/positions.csv`
+### `data/scan.csv` — 자동스캔 신호 캐시 (알림 전용, 매매 없음)
+`market,code,name,signal,entry_price,close,high,n_high,n_high_ratio,atr,low,n_low,last_close`
+- `signal`: 진입 / 관심 / 확정 / 확정이탈 / 탈락
+- `entry_price`: '확정' 전환 시점의 종가 (확정이탈 시 휩쏘 이력 기록에 사용, 실제
+  매수가와 무관 — 사용자가 실제로 샀는지 여부와 독립적으로 시스템이 자체 학습함)
+- `last_close`: `watchlist_check.py`가 5분마다 갱신하는 직전 현재가 (추세 표시용)
+- `save_scan_for_market`: 전체스캔이 재실행돼도 기존 '확정' 종목은 새 결과에 없어도
+  보존함 (재확인이 계속 감시할 수 있게, 터틀과 동일 로직)
+
+### `data/positions.csv` — 실제 보유종목 (buy 명령으로만 생성)
 `position_id,market,code,name,entry_price,atr_entry,hard_stop_price,highest_price,last_milestone,last_price,last_n_low,status,entry_date`
-- `market`: KR / US / COIN
-- `status`: active(감시중) / closed(청산됨 — 3일신저가 또는 하드스탑)
-- `hard_stop_price`: 진입 시 1회 계산되어 고정, 이후 변하지 않음
-- `highest_price`: 순수 정보 기록용 (마일스톤 알림 계산에만 사용, 청산 판정과 무관)
-- `last_n_low` **[v3 신규]**: 직전 5분 체크 때의 3일저가선(청산가) 값, 청산가 추세 표시용
+- `status`: **active**(감시중) / **stop_hit**(매도검토 알림 나감, 여전히 감시중,
+  자동으로 안 팔림) / **closed_manual**(sell 명령으로 실제 종료)
+- `hard_stop_price`: buy 시점에 1회 계산되어 고정 (트레일링 아님)
+- scan.csv와 완전 무관 — scan.csv에서 '진입'/'확정'이 아무리 떠도 여기엔 아무 일도
+  안 일어남. 오직 텔레그램 `buy` 명령만이 이 파일에 행을 추가함
 
-### `data/watch.csv`
-`market,code,name,close,n_high,n_high_ratio,atr,last_close`
-- `last_close` **[v3 신규]**: 직전 5분 체크 때의 현재가, 추세 표시용. `watchlist_check.py`가
-  갱신하고, `save_watch_for_market`이 시장별 행을 갈아끼울 때 같은 코드면 이 값을
-  이어받아서(carry-forward) 추세 표시가 끊기지 않게 함
+### `data/tracked.csv`
+`code,market,status` — 변경 없음 (텔레그램 `추적시작`/`추적종료`로만 관리)
 
 ### `data/trade_history.csv`
-`market,code,last_result,skip_active,skip_price` — v1과 동일 구조
+`market,code,last_result,skip_active,skip_price`
+- **scan.csv 파이프라인(관심→확정→확정이탈) 전용**. `recheck_*.py`만 이 파일을 읽고 씀.
+- `position_check.py`/`bot_commands.py`(실제 buy/sell)는 이 파일을 전혀 건드리지 않음
+  (터틀과 동일 — 실제 매매와 자동스캔의 학습은 서로 독립적)
 
 ---
 
-## 신호 처리 흐름 (v3)
+## 신호 처리 흐름 (v7, 터틀과 동일한 3단계 분리 구조)
 
-1. **전체스캔**: 5일 신고가 신선돌파 감지 → 추격필터+휩쏘필터 통과 시
-   `entry_price`, `atr_entry`(ATR10), `hard_stop_price`(하이브리드 계산)를 채워서
-   포지션 즉시 등록. `highest_price`는 진입가로 초기화.
-2. **재확인(5분, 장중/코인24h)**: watch.csv 관심종목만 재조회, 장중 돌파 시 즉시
-   포지션 등록 (전체스캔과 동일한 하드스탑 계산 로직 재사용)
-3. **포지션 체크(5분)**: 활성 포지션마다 최근 히스토리(20일치) 조회 →
-   `check_channel_exit`(3일 신저가)과 하드스탑 이탈 여부를 함께 판정 →
-   둘 중 하나라도 걸리면 `status=closed` + 휩쏘 이력 기록 + 청산 알림.
-   최고가 갱신 시 마일스톤(ATR배수) 알림도 별도로 발송 (청산과 무관한 정보성 알림).
-   매 실행마다 활성 포지션 전체 현황을 무조건 요약 발송 — **[v3]** 현재가 추세,
-   **3일저가선(청산가) 추세**, **하드스탑까지 남은 거리(%)** 함께 표시.
-4. **[v3 신규] 관심종목 현황요약(5분, 장중/코인24h)**: `watchlist_check.py`가
-   watch.csv 전체를 대상으로 현재가만 가볍게 조회해서 5일고가선 대비 근접도와
-   현재가 추세를 `🎯 [관심종목 현황]` 헤더로 무조건 요약 발송. 상태 전환(진입/탈락)
-   판정은 하지 않음 (그건 `recheck_*.py` 담당) — 순수 보고 전용.
+### A. 자동스캔 파이프라인 (알림 전용)
+1. **전체스캔**: 5일 신고가 신선돌파 감지 → 추격필터 통과 시 signal='진입', 근접
+   시 signal='관심'으로 scan.csv에 기록. 진입신호가 여러 개면 `pick_top_entry`로
+   가장 신선한 것 1개만 골라 "매수 검토" 알림(`buy 코드 가격` 안내 포함) 발송.
+   기존 '확정' 종목은 이번 결과에 없어도 보존.
+2. **재확인(5분, 장중/코인24h)**: scan.csv에서 signal이 관심/확정인 것만 재조회.
+   - 기존 '확정' → 3일신저가 이탈이면 '확정이탈'(휩쏘 이력에 승/패 기록, "매도 검토"
+     알림), 아니면 '확정유지'
+   - 기존 '관심' 중 신선돌파 재확인되면 → 휩쏘필터 통과 시 '확정'("매수 검토" 알림),
+     탈락 시 '관심' 유지
+3. **관심종목 현황요약(5분, watchlist_check.py)**: scan.csv의 관심 종목들 현재가만
+   가볍게 조회해서 무조건 요약(🎯). 상태 판정은 안 함, 순수 보고용.
+
+### B. 실제 보유종목 관리 (수동 매매, 자동 감시)
+4. **buy 명령**: 사용자가 알림 보고 직접 입력 → positions.csv에 등록, ATR10 계산해서
+   하드스탑(1.5×ATR10/-7% 중 타이트한 쪽) 확정
+5. **보유종목 감시(5분, position_check.py)**: 3일신저가 또는 하드스탑 이탈 시
+   **"매도 검토" 알림만** 발송, status='stop_hit'으로 변경 (자동으로 안 팔림).
+   ATR 마일스톤 도달 시 진행상황 알림. 매 실행마다 무조건 현황 요약(📦), stop_hit은
+   "🔴 손절확정 (매도대기)" 태그로 구분 표시.
+6. **sell 명령**: 사용자가 직접 입력해야 status='closed_manual'로 실제 종료됨.
+   active든 stop_hit이든 상관없이 sell로 찾아서 종료 가능.
+
+### C. 수동 추적목록 (별도 관심 관리)
+7. **추적시작/추적종료**: scan.csv/positions.csv와 무관하게 사용자가 지정한 종목만
+   별도로 tracked.csv에 등록/해제
+8. **추적목록 상태변화 알림(5분, tracked_check.py)**: 상태(진입/관심/청산/관찰중)가
+   바뀔 때만 알림. `추적확인` 명령으로 그 순간 실시간 재조회도 가능.
 
 ---
 
@@ -287,33 +439,38 @@ high5-screener/
 
 1. **가격 필터 없음**(국장): 후보 과다 문제 생기면 `full_scan_korea.py` 상단
    `PRICE_MIN`/`PRICE_MAX`를 채워서 필터링 가능.
-2. **포지션 수 제한 없음**: 조건 통과하는 모든 종목이 각각 포지션으로 등록됨.
-3. **텔레그램 명령어 없음**: buy/sell/list 같은 수동 명령 없음, 전량 자동 진입/청산.
-4. **웹 대시보드 없음**.
-5. **하드스탑 숫자(1.5×ATR10, -7%)는 경험적 기본값**: 실운영 며칠 후 승률/손익비
-   보고 조정 여지 있음. 특히 코인처럼 변동성이 아주 큰 자산에서 -7%가 여전히
-   크게 느껴지면 %캡을 낮추는 것(예: -5%)을 고려.
-6. **채널청산과 하드스탑 우선순위**: 코드상 "둘 다 걸리면 채널청산 우선 표기"로
-   처리했지만 실제 청산 처리(포지션 종료)는 둘 중 하나만 걸려도 즉시 발생 — 동작에
-   차이는 없고 알림 문구만 다름.
+2. **하드스탑 숫자(1.5×ATR10, -7%)는 경험적 기본값**: 실운영 며칠 후 승률/손익비
+   보고 조정 여지 있음.
+3. **웹 대시보드 없음**.
+4. **채널청산과 하드스탑이 동시에 걸리면** 알림 문구에 "동시 이탈"로 표기 (판정
+   자체는 둘 중 하나만 걸려도 stop_hit 처리, 동작 차이 없음).
+5. **실제 매매(positions.csv)는 휩쏘필터 학습과 무관**: scan.csv 파이프라인 자체의
+   신호이력만으로 휩쏘를 학습함 (터틀과 동일 설계 — 사용자가 실제로 샀는지와
+   무관하게 시스템 자체 신호 사이클로 판단).
 
 ---
 
 ## 다음 세션에서 확인해야 할 것
 
 1. 새 저장소/새 텔레그램 봇 생성 + 시크릿 등록 완료 여부
-2. 첫 전체스캔 실행 후 진입/관심 분류 및 하드스탑 계산값이 의도대로 나오는지 확인
-3. `position_check.py`의 채널청산(3일 신저가) 판정이 실제 장중 데이터로 잘 걸리는지 확인
-4. 하드스탑(1.5×ATR10 / -7%) 중 실제로 어느 쪽이 더 자주 채택되는지 며칠 지켜보고
+2. **[v7]** 첫 전체스캔 실행 후 scan.csv에 진입/관심 신호가 의도대로 기록되고,
+   `buy {code} {price}` 안내 문구가 포함된 알림이 정상 발송되는지 확인
+3. **[v7]** recheck 재실행 시 '확정' → '확정이탈' 전환이 정상 동작하고, 3일신저가
+   재확인 로직이 실제 장중 데이터로 잘 걸리는지 확인
+4. **[v7]** position_check.py가 3일신저가/하드스탑 이탈 시 **자동으로 안 팔고**
+   "매도 검토" 알림만 보내는지, status가 stop_hit으로만 바뀌는지 (closed로 바뀌면
+   버그) 실운영에서 확인
+5. **[v7]** stop_hit 상태에서도 `sell` 명령으로 정상 종료되는지, `list`에
+   `[손절확정/매도대기]` 태그로 표시되는지 확인
+6. 하드스탑(1.5×ATR10 / -7%) 중 실제로 어느 쪽이 더 자주 채택되는지 며칠 지켜보고
    숫자 조정 필요 여부 판단
-5. 휩쏘 필터가 실제 거래 사이클(진입→청산→다음 진입 스킵)에서 잘 작동하는지 확인
-6. 국장 KRX 조회 실패 시 재시도(3회, 15초 간격) 로직이 실제 장애 상황에서 잘 동작하는지
-7. **[v4]** `buy`/`sell`/`list`/`추적시작`/`추적종료`/`추적확인`/`명령어확인`
-   명령어가 실제 텔레그램에서 5분 내로 정상 응답하는지 확인 (합성 데이터로는
-   검증했으나 실제 네트워크/실거래 데이터로는 미확인 상태)
-8. **[v4]** `telegram_offset.txt` 기반 중복처리 방지가 실제 GitHub Actions
-   동시실행 상황에서도 잘 작동하는지 확인 (여러 워크플로우가 동시에 커밋을
-   시도하면 git push 충돌 가능성 있음 — 발생 시 재시도 로직 추가 검토)
+7. 휩쏘 필터가 scan.csv 파이프라인 자체 사이클(확정→확정이탈→다음 확정 스킵)에서
+   잘 작동하는지 확인
+8. 국장 KRX 조회 실패 시 재시도(3회, 15초 간격) 로직이 실제 장애 상황에서 잘 동작하는지
+9. `buy`/`sell`/`list`/`추적시작`/`추적종료`/`추적확인`/`명령어확인` 명령어가
+   실제 텔레그램에서 5분 내로 정상 응답하는지 확인
+10. `telegram_offset.txt` 기반 중복처리 방지가 실제 GitHub Actions 동시실행
+    상황에서도 잘 작동하는지 확인
 
 ---
 
