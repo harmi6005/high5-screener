@@ -20,7 +20,7 @@ jobs:
           HIGH5_TELEGRAM_BOT_TOKEN: ${{ secrets.HIGH5_TELEGRAM_BOT_TOKEN }}
           HIGH5_TELEGRAM_CHAT_ID: ${{ secrets.HIGH5_TELEGRAM_CHAT_ID }}
         run: python scripts/position_check.py
-              - name: 결과 커밋
+      - name: 결과 커밋
         run: |
           git config user.name "high5-bot"
           git config user.email "high5-bot@users.noreply.github.com"
