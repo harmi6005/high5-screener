@@ -1,0 +1,29 @@
+name: 포지션 청산 체크
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+      - name: 포지션 청산 체크 (3일신저가 + 하드스탑)
+        env:
+          HIGH5_TELEGRAM_BOT_TOKEN: ${{ secrets.HIGH5_TELEGRAM_BOT_TOKEN }}
+          HIGH5_TELEGRAM_CHAT_ID: ${{ secrets.HIGH5_TELEGRAM_CHAT_ID }}
+        run: python scripts/position_check.py
+      - name: 결과 커밋
+        run: |
+          git config user.name "high5-bot"
+          git config user.email "high5-bot@users.noreply.github.com"
+          git add data/positions.csv data/trade_history.csv
+          git diff --cached --quiet || git commit -m "포지션 상태 업데이트"
+          git push
