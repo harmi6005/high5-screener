@@ -108,6 +108,7 @@ def check_high5_system(df):
     merged = dict(entry_res)
     merged['exit_signal'] = bool(exit_res and exit_res['exit_signal'])
     merged['n_low'] = exit_res['n_low'] if exit_res else None
+    merged['low'] = exit_res['low'] if exit_res else None
     return merged
 
 

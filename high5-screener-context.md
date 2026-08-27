@@ -489,3 +489,25 @@ high5-screener/
      한 파일씩 생성하는 방법으로 우회 가능
   3. `.github/workflows`가 비어있으면 Actions 탭이 "Get started with GitHub
      Actions" 추천 템플릿 화면만 보여줌 (워크플로우 인식 자체가 안 된 상태라는 신호)
+
+---
+
+## v7 버그 수정 (실제 배포 후 발견) — entry_price/low 필드 누락
+
+첫 배포 후 국내 전체스캔 실행 시 아래 에러로 실패:
+```
+KeyError: "['entry_price', 'low'] not in index"
+```
+**원인**: `SCAN_COLUMNS`에는 `entry_price`, `low` 필드가 있는데, `check_high5_system()`이
+반환하는 dict와 `full_scan_*.py`가 만드는 행(row) dict에는 이 두 필드가 없었음.
+신호가 하나라도 잡히면 그 즉시 컬럼 불일치로 `save_scan_for_market`이 죽음.
+
+**수정**:
+1. `common.py`의 `check_high5_system()`이 `check_channel_exit()`의 `low`(오늘 저가)
+   값도 함께 반환하도록 수정
+2. `full_scan_korea.py`/`full_scan_us.py`/`full_scan_bithumb.py`가 행을 만들 때
+   `'entry_price': ''`를 명시적으로 채우도록 수정 (확정 전까지는 빈 값, recheck에서
+   '확정' 전환 시 실제 값 채워짐)
+
+**검증**: 신호 0개/1개 케이스, 확정종목 보존 케이스 모두 합성 데이터로 재현 후
+정상 동작 확인함.

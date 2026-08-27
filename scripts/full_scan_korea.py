@@ -62,7 +62,7 @@ def fetch_and_check(code_name, start, end):
     else:
         return None
 
-    return {'code': code, 'name': name, 'signal': signal, **res}
+    return {'code': code, 'name': name, 'signal': signal, 'entry_price': '', **res}
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ def fetch_and_check(coin):
     else:
         return None
 
-    return {'code': coin, 'name': coin, 'signal': signal, **res}
+    return {'code': coin, 'name': coin, 'signal': signal, 'entry_price': '', **res}
 
 
 if __name__ == "__main__":

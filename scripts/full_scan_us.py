@@ -54,7 +54,7 @@ if __name__ == "__main__":
                 signal = '관심'
             else:
                 continue
-            rows.append({'code': t, 'name': t, 'signal': signal, **res})
+            rows.append({'code': t, 'name': t, 'signal': signal, 'entry_price': '', **res})
         except Exception:
             continue
 
