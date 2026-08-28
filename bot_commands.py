@@ -77,7 +77,9 @@ def handle_buy(args, pos_df):
                      f"{code} [{market}]\n"
                      f"매수가 {fmt_num(buy_price)}\n"
                      f"하드스탑(1.5xATR10 / -7% 중 타이트한 쪽) {fmt_num(hard_stop)} (ATR≈{fmt_num(atr)})\n"
-                     f"3일 신저가 이탈 시 자동 청산됩니다.")
+                     f"3일 신저가 또는 하드스탑 이탈 시 자동으로 팔리지 않아요. "
+                     f"'매도 검토' 알림만 가고, sell {pid} 명령을 직접 입력해야 종료됩니다.\n"
+                     f"5분마다 현재가/손익/청산가 추세를 담은 현황 알림이 계속 옵니다.")
 
 
 def handle_sell(args, pos_df):
