@@ -1,0 +1,24 @@
+name: telegram_listener
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  listen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python scripts/telegram_listener.py
+        env:
+          HIGH5_TELEGRAM_BOT_TOKEN: ${{ secrets.HIGH5_TELEGRAM_BOT_TOKEN }}
+          HIGH5_TELEGRAM_CHAT_ID: ${{ secrets.HIGH5_TELEGRAM_CHAT_ID }}
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "telegram listener update"
+          file_pattern: "data/*.csv data/telegram_offset.txt"
