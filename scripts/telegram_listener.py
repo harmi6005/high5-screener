@@ -4,6 +4,10 @@
 터틀 스크리너의 telegram_listener.py를 그대로 이식. 웹훅이 활성화되어 있으면
 getUpdates가 에러를 반환하는데, 이 경우 조용히 건너뛰도록 방어함
 (웹훅을 나중에 해제하면 폴링이 자동으로 다시 살아남).
+
+포지션확인/관심확인 명령을 지원하기 위해 scan.csv도 함께 로드해서 dispatch_lines에
+넘긴다 (읽기 전용, 여기서 scan.csv를 저장하지는 않음 — 그건 recheck/watchlist_check
+스크립트의 몫).
 """
 
 import sys
@@ -12,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import requests
 from common import send_long_message
-from storage import load_positions, save_positions, load_tracked, save_tracked
+from storage import load_positions, save_positions, load_tracked, save_tracked, load_scan
 from bot_commands import dispatch_lines
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
@@ -62,6 +66,7 @@ if __name__ == "__main__":
 
     pos_df = load_positions()
     tracked_df = load_tracked()
+    scan_df = load_scan()
 
     pos_changed = False
     tracked_changed = False
@@ -81,7 +86,8 @@ if __name__ == "__main__":
             continue
 
         print(f"명령어 처리: {text}")
-        pos_df, tracked_df, reply, p_changed, t_changed = dispatch_lines(text, pos_df, tracked_df)
+        pos_df, tracked_df, reply, p_changed, t_changed = dispatch_lines(
+            text, pos_df, tracked_df, scan_df)
         pos_changed = pos_changed or p_changed
         tracked_changed = tracked_changed or t_changed
         if reply:
