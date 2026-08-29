@@ -22,6 +22,7 @@ MAX_CHASE_RATIO = 0.005    # 진입가 대비 0.5% 초과 추격매수 스킵
 ATR_PERIOD = 10            # 변동성 측정 기간 (짧은 호흡에 맞춰 10일로 단축)
 ATR_MULTIPLIER = 1.5       # 하드스탑 ATR 배수
 HARD_STOP_PCT = 0.07       # 하드스탑 퍼센트 캡 (진입가 대비 -7%)
+TOP_PICKS_COUNT = 3        # 전체스캔 1회당 알림으로 뽑는 강력한 픽 개수
 
 
 def calc_atr(df, period=ATR_PERIOD):
@@ -36,7 +37,12 @@ def calc_atr(df, period=ATR_PERIOD):
 
 
 def check_high5_breakout(df, entry_period=ENTRY_PERIOD, watch_ratio=WATCH_RATIO):
-    """5일 신고가 돌파 판정 (진입용)."""
+    """5일 신고가 돌파 판정 (진입용).
+
+    n_high는 '전일 하루'가 아니라 오늘을 제외한 최근 entry_period(5)거래일 전체의
+    최고가(rolling(entry_period).max().shift(1))로 계산한다. 즉 오늘 종가를
+    "최근 5거래일 고점"과 비교하는 것이 기준이며, 이는 fresh_entry_signal 판정과
+    아래 강도(strength) 점수 계산 모두에 동일하게 사용된다."""
     min_len = entry_period * 2 + ATR_PERIOD + 5
     if len(df) < min_len:
         return None
@@ -112,15 +118,24 @@ def check_high5_system(df):
     return merged
 
 
-def pick_top_entry(df):
-    """진입 신호가 여러 개일 때, 초과율(=최근 방금 돌파한 정도)이 가장 작은
-    '가장 신선한 돌파' 1개만 골라서 알림 스팸을 방지한다 (터틀과 동일 철학)."""
+def pick_top_entries(df, top_n=TOP_PICKS_COUNT):
+    """진입 신호 종목 중 '돌파 강도'가 큰 순서로 top_n개를 골라서 반환한다.
+
+    강도(strength) = (오늘 종가 - 5일 최고가) / ATR(10일)
+    → 5일 최고가(n_high, 오늘을 제외한 최근 5거래일 전체 기준)를 변동성(ATR) 대비
+      얼마나 강하게 뚫고 올라왔는지를 나타내는 지표. 값이 클수록 더 강력한 돌파로 본다.
+      (기존 '가장 신선한 돌파 1개'만 뽑던 pick_top_entry를 대체 — 신선도가 아니라
+      강도 기준으로 3개를 뽑도록 완전히 교체됨)
+
+    excess_ratio(초과율, (close-n_high)/n_high)는 참고용 정보로 함께 남겨둔다.
+    후보가 top_n보다 적으면 있는 만큼만, 아예 없으면 빈 DataFrame을 반환한다."""
     entry_df = df[df['signal'] == '진입'].copy()
     if entry_df.empty:
-        return None
+        return entry_df
+    entry_df['strength'] = (entry_df['close'] - entry_df['n_high']) / entry_df['atr']
     entry_df['excess_ratio'] = (entry_df['close'] - entry_df['n_high']) / entry_df['n_high']
-    entry_df = entry_df.sort_values('excess_ratio', ascending=True)
-    return entry_df.iloc[0]
+    entry_df = entry_df.sort_values('strength', ascending=False)
+    return entry_df.head(top_n)
 
 
 # ===== 시장 판별 / 시세 조회 (텔레그램 명령어 처리용 공용 함수) =====
