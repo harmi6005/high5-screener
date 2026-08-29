@@ -6,14 +6,19 @@
 telegram_listener.py(폴링, 5분마다)와 webhook_handler.py(웹훅, 즉시)가
 둘 다 이 모듈의 함수를 가져다 쓴다.
 
-지원 명령어 (터틀과 동일한 명령어 집합):
+지원 명령어:
 - buy 코드 매수가
 - sell 거래번호 [매도가]
 - list
 - 코드 추적시작
 - 코드 추적종료 (추적해제/추적중지도 동일)
 - 추적확인 (추적목록도 동일)
+- 포지션확인 (포지션목록/보유확인도 동일)   ← 보유종목(positions.csv) 실시간 재조회
+- 관심확인 (관심목록도 동일)               ← 관심종목(scan.csv) 실시간 재조회
 - 명령어확인 (명령어 확인/도움말/help/(/help)도 동일)
+
+포지션확인/관심확인은 5분 자동요약과 달리 장중/장마감 시간대와 무관하게
+호출 즉시 현재가를 재조회해서 보여준다 (읽기 전용, CSV에 아무것도 안 씀).
 """
 
 from datetime import datetime
@@ -21,12 +26,14 @@ import pandas as pd
 
 from common import (ATR_PERIOD, ENTRY_PERIOD, WATCH_RATIO, EXIT_PERIOD,
                      calc_atr, calc_hard_stop, check_high5_breakout, check_channel_exit,
-                     detect_market, fetch_ohlc, fmt_num)
+                     detect_market, fetch_ohlc, fetch_current_price, fmt_num)
 from storage import gen_position_id, already_holding
 
 START_WORDS = ('추적시작',)
 STOP_WORDS = ('추적종료', '추적해제', '추적중지')
-CHECK_WORDS = ('추적확인', '추적목록')
+TRACK_CHECK_WORDS = ('추적확인', '추적목록')
+POSITION_CHECK_WORDS = ('포지션확인', '포지션목록', '보유확인')
+WATCH_CHECK_WORDS = ('관심확인', '관심목록')
 HELP_WORDS = ('명령어확인', '명령어 확인', '도움말', 'help')
 
 
@@ -79,7 +86,8 @@ def handle_buy(args, pos_df):
                      f"하드스탑(1.5xATR10 / -7% 중 타이트한 쪽) {fmt_num(hard_stop)} (ATR≈{fmt_num(atr)})\n"
                      f"3일 신저가 또는 하드스탑 이탈 시 자동으로 팔리지 않아요. "
                      f"'매도 검토' 알림만 가고, sell {pid} 명령을 직접 입력해야 종료됩니다.\n"
-                     f"5분마다 현재가/손익/청산가 추세를 담은 현황 알림이 계속 옵니다.")
+                     f"5분마다 현재가/손익/청산가 추세를 담은 현황 알림이 계속 오고, "
+                     f"포지션확인 명령으로 그 즉시 실시간 조회도 가능해요.")
 
 
 def handle_sell(args, pos_df):
@@ -119,6 +127,98 @@ def handle_list(pos_df):
         lines.append(f"[{r['position_id']}] {r['name']}({r['code']}) [{r['market']}]{tag} "
                       f"매수 {fmt_num(r['entry_price'])} / 최고가 {fmt_num(r['highest_price'])} / "
                       f"하드스탑 {fmt_num(r['hard_stop_price'])} / {r['last_milestone']}배 수익 도달")
+    return "\n".join(lines)
+
+
+def handle_position_check(pos_df):
+    """`list`와 달리, 호출한 그 순간 현재가를 실시간 재조회해서 보여준다
+    (장중/장마감 시간대와 무관하게 항상 동작, 읽기 전용 — CSV에 아무것도 안 씀)."""
+    active = pos_df[pos_df['status'] != 'closed_manual']
+    if active.empty:
+        return "현재 감시 중인 보유종목이 없어요."
+
+    lines = [f"포지션 실시간 확인 {len(active)}건:"]
+    for _, row in active.iterrows():
+        market, code = row['market'], row['code']
+        price = fetch_current_price(market, code)
+        if price is None:
+            lines.append(f"- [{row['position_id']}] {row['name']}({code}) [{market}]: 현재가 조회 실패")
+            continue
+
+        try:
+            entry_price = float(row['entry_price'])
+            hard_stop_price = float(row['hard_stop_price'])
+        except (TypeError, ValueError):
+            lines.append(f"- [{row['position_id']}] {row['name']}({code}) [{market}]: 데이터 이상, 건너뜀")
+            continue
+
+        pnl_pct = (price - entry_price) / entry_price * 100 if entry_price else None
+        gap_pct = (price - hard_stop_price) / hard_stop_price * 100 if hard_stop_price else None
+
+        if row['status'] == 'stop_hit':
+            tag = "🔴 손절확정 (매도대기)"
+        elif gap_pct is not None and gap_pct <= 3.0:
+            tag = "🔶 하드스탑 근접"
+        else:
+            tag = "🟢 정상"
+
+        n_low_str = "N/A"
+        hist = fetch_ohlc(market, code, days=20)
+        if hist is not None:
+            channel = check_channel_exit(hist, EXIT_PERIOD)
+            if channel:
+                n_low_str = fmt_num(channel['n_low'])
+
+        pnl_str = f"{pnl_pct:+.2f}%" if pnl_pct is not None else "N/A"
+        gap_str = f" (남은거리 {gap_pct:+.2f}%)" if gap_pct is not None else ""
+
+        lines.append(
+            f"- [{row['position_id']}] {row['name']}({code}) [{market}] {tag}\n"
+            f"  현재가 {fmt_num(price)} / 매수가 {fmt_num(entry_price)} (손익 {pnl_str})\n"
+            f"  3일저가선 {n_low_str} / 하드스탑 {fmt_num(hard_stop_price)}{gap_str}"
+        )
+    return "\n".join(lines)
+
+
+# ===== 자동스캔 관심종목(scan.csv) 실시간 확인 =====
+
+def handle_watch_check(scan_df):
+    """scan.csv의 signal=='관심' 종목들을 호출 즉시 현재가로 재조회해서 보여준다
+    (5분 자동요약과 별개, 시간대 무관, 읽기 전용 — CSV에 아무것도 안 씀)."""
+    if scan_df is None or scan_df.empty:
+        return "현재 관심종목이 없어요."
+
+    watch_df = scan_df[scan_df['signal'] == '관심']
+    if watch_df.empty:
+        return "현재 관심종목이 없어요."
+
+    lines = [f"관심종목 실시간 확인 {len(watch_df)}종목:"]
+    for _, row in watch_df.iterrows():
+        market, code = row['market'], row['code']
+        price = fetch_current_price(market, code)
+        if price is None:
+            lines.append(f"- {row['name']}({code}) [{market}]: 현재가 조회 실패")
+            continue
+
+        try:
+            n_high = float(row['n_high'])
+        except (TypeError, ValueError):
+            n_high = None
+
+        ratio = price / n_high if n_high else None
+        ratio_str = f"{ratio*100:.1f}%" if ratio is not None else "N/A"
+        if ratio is not None and ratio >= 1.0:
+            tag = "⚡ 돌파(재확인 대기)"
+        elif ratio is not None and ratio >= 0.99:
+            tag = "🔶 돌파임박"
+        else:
+            tag = "🟢 관찰중"
+
+        n_high_str = fmt_num(n_high) if n_high is not None else "N/A"
+        lines.append(
+            f"- {row['name']}({code}) [{market}] {tag}\n"
+            f"  현재가 {fmt_num(price)} / 5일고가선 {n_high_str} ({ratio_str})"
+        )
     return "\n".join(lines)
 
 
@@ -187,17 +287,23 @@ def handle_help():
         "sell 거래번호 [매도가]\n"
         "  예) sell 4821 또는 sell 4821 73000\n\n"
         "list\n"
-        "  현재 감시 중인 거래 목록\n\n"
+        "  현재 감시 중인 거래 목록 (등록된 값 기준)\n\n"
+        "포지션확인 (포지션목록/보유확인도 동일)\n"
+        "  보유종목을 지금 이 순간 실시간 재조회\n\n"
         "코드 추적시작 (예: 005930 추적시작)\n"
         "코드 추적종료 (추적해제/추적중지도 동일)\n"
         "추적확인 (추적목록도 동일)\n"
+        "  추적목록을 지금 이 순간 실시간 재조회\n\n"
+        "관심확인 (관심목록도 동일)\n"
+        "  자동스캔 관심종목을 지금 이 순간 실시간 재조회\n\n"
         "명령어확인 (도움말/help도 동일)"
     )
 
 
-def dispatch(text, pos_df, tracked_df):
+def dispatch(text, pos_df, tracked_df, scan_df):
     """명령어 텍스트 1개를 해석해서 처리한다.
-    반환값: (pos_df, tracked_df, reply_text_or_None, is_long_reply, pos_changed, tracked_changed)"""
+    반환값: (pos_df, tracked_df, reply_text_or_None, is_long_reply, pos_changed, tracked_changed)
+    scan_df는 관심확인 조회 전용(읽기만 함, 변경/저장 없음)."""
     text = text.strip()
     if not text:
         return pos_df, tracked_df, None, False, False, False
@@ -219,13 +325,19 @@ def dispatch(text, pos_df, tracked_df):
         pos_changed = True
     elif cmd == 'list':
         reply = handle_list(pos_df)
+    elif text in POSITION_CHECK_WORDS:
+        reply = handle_position_check(pos_df)
+        is_long = True
+    elif text in WATCH_CHECK_WORDS:
+        reply = handle_watch_check(scan_df)
+        is_long = True
     elif len(parts) == 2 and parts[1] in START_WORDS:
         tracked_df, reply = handle_track_start(parts[0], tracked_df)
         tracked_changed = True
     elif len(parts) == 2 and parts[1] in STOP_WORDS:
         tracked_df, reply = handle_track_stop(parts[0], tracked_df)
         tracked_changed = True
-    elif text in CHECK_WORDS:
+    elif text in TRACK_CHECK_WORDS:
         reply = handle_track_check(tracked_df)
         is_long = True
     elif text in HELP_WORDS or cmd == 'help':
@@ -234,7 +346,7 @@ def dispatch(text, pos_df, tracked_df):
     return pos_df, tracked_df, reply, is_long, pos_changed, tracked_changed
 
 
-def dispatch_lines(text, pos_df, tracked_df):
+def dispatch_lines(text, pos_df, tracked_df, scan_df):
     """여러 줄로 온 명령어를 줄 단위로 각각 처리하고 답장을 합쳐서 반환.
     반환값: (pos_df, tracked_df, combined_reply, pos_changed, tracked_changed)"""
     replies = []
@@ -246,7 +358,7 @@ def dispatch_lines(text, pos_df, tracked_df):
         if not line:
             continue
         pos_df, tracked_df, reply, _is_long, pos_changed, tracked_changed = dispatch(
-            line, pos_df, tracked_df)
+            line, pos_df, tracked_df, scan_df)
         if reply:
             replies.append(reply)
         pos_changed_any = pos_changed_any or pos_changed
