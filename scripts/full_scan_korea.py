@@ -2,7 +2,10 @@
 """국내(코스피) 5일 신고가 전체 스캔 (GitHub Actions에서 지정 시간에 자동 실행)
 
 ⚠️ 알림 전용입니다. 자동으로 매수하지 않습니다. 실제 매수는 텔레그램 `buy` 명령으로만
-등록됩니다 (터틀 스크리너와 동일한 방식). 이 스크립트는 scan.csv에 신호 상태만 기록함."""
+등록됩니다 (터틀 스크리너와 동일한 방식). 이 스크립트는 scan.csv에 신호 상태만 기록함.
+
+진입 신호가 여러 개 뜨면, 돌파 강도(ATR 대비 5일 신고가 초과폭)가 가장 큰 상위
+TOP_PICKS_COUNT(기본 3)개를 골라 "강력한 픽" 알림으로 발송한다."""
 
 import sys
 import os
@@ -13,7 +16,8 @@ import pandas as pd
 import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from common import MAX_CHASE_RATIO, check_high5_system, notify_telegram, send_long_message, build_watch_summary, pick_top_entry
+from common import (MAX_CHASE_RATIO, TOP_PICKS_COUNT, check_high5_system, notify_telegram,
+                     send_long_message, build_watch_summary, pick_top_entries)
 from storage import save_scan_for_market
 
 MAX_WORKERS = 20
@@ -65,6 +69,18 @@ def fetch_and_check(code_name, start, end):
     return {'code': code, 'name': name, 'signal': signal, 'entry_price': '', **res}
 
 
+def build_top_picks_message(top_entries, entry_cnt):
+    lines = [f"[국장 전체스캔] 진입 신호 {entry_cnt}개 중 강도 상위 {len(top_entries)}개 픽 (매수 검토)"]
+    for rank, (_, row) in enumerate(top_entries.iterrows(), 1):
+        lines.append(
+            f"{rank}위. {row['name']}({row['code']})\n"
+            f"   현재가 {row['close']} / 진입가(5일 신고가) {row['n_high']} / 참고 3일저가 {row['n_low']}\n"
+            f"   강도(ATR배수) {row['strength']:.3f} / 초과율 {row['excess_ratio']*100:.3f}%\n"
+            f"   buy {row['code']} {row['close']} 명령으로 등록할 수 있어요."
+        )
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     listing = get_listing_with_retry()
     if listing is None:
@@ -100,17 +116,9 @@ if __name__ == "__main__":
     print(f"[국장 5일신고가] 진입 {entry_cnt}개 / 관심 {watch_cnt}개")
 
     if entry_cnt > 0:
-        top = pick_top_entry(df)
-        if top is not None:
-            excess_pct = top['excess_ratio'] * 100
-            msg = (
-                f"[국장 전체스캔] 진입 신호 {entry_cnt}개 중 최신 돌파 1개 픽 (매수 검토)\n"
-                f"- {top['name']}({top['code']})\n"
-                f"  현재가 {top['close']} / 진입가(돌파) {top['n_high']} / 참고 3일저가 {top['n_low']}\n"
-                f"  초과율 {excess_pct:.3f}%\n"
-                f"buy {top['code']} {top['close']} 명령으로 등록할 수 있어요."
-            )
-            notify_telegram(msg)
+        top_entries = pick_top_entries(df, top_n=TOP_PICKS_COUNT)
+        if not top_entries.empty:
+            send_long_message(build_top_picks_message(top_entries, entry_cnt))
     else:
         notify_telegram("[국장 5일신고가] 전체스캔 완료 - 신규 진입 없음")
 
