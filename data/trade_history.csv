@@ -1,1 +1,3 @@
 market,code,last_result,skip_active,skip_price
+COIN,ICP,loss,False,
+COIN,XAI,loss,False,
