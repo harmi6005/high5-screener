@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (MAX_CHASE_RATIO, check_high5_system, notify_telegram, send_long_message,
                      fmt_num, trend_arrow, load_trade_history, save_trade_history,
                      check_whipsaw, record_trade_result)
-from storage import load_scan, save_scan_for_market
+from storage import load_scan, save_scan_for_market, is_market_paused
 
 MAX_WORKERS = 20
 MARKET_LABEL = 'KR'
@@ -70,6 +70,10 @@ def build_watch_tag(ratio):
 
 
 if __name__ == "__main__":
+    if is_market_paused('KR'):
+        print("국장 추적이 일시정지 상태라서 재확인을 건너뜁니다. "
+              "'국장 추적재시작' 명령으로 재개할 수 있어요.")
+        sys.exit(0)
     if not is_korea_market_open():
         print("국내 장 시간이 아니라서 재확인을 건너뜁니다 (평일 09:00~15:30 KST).")
         sys.exit(0)
