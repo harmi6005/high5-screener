@@ -1,12 +1,13 @@
 name: 추적목록 확인
 
-# ⚠️ schedule(GitHub 자체 cron) 트리거를 의도적으로 제거함.
-# cron-job.org가 5분마다 이 워크플로우의 workflow_dispatch를 GitHub API로 직접 호출하고
-# 있는데, 여기에 GitHub 자체 schedule('*/5 * * * *')까지 같이 켜져 있으면 두 트리거가
-# 각각 별도로 실행돼서 실질적으로 1~2분 간격처럼 중복 실행되는 문제가 있었음.
-# workflow_dispatch만 남겨서 cron-job.org의 5분 호출로만 돌게 함.
+# concurrency 그룹으로 data/ 커밋 워크플로우들이 동시에 안 돌게 하고, 커밋 단계에
+# pull --rebase 재시도까지 추가해서 "failed to push some refs" 충돌을 방지함.
 on:
   workflow_dispatch:
+
+concurrency:
+  group: high5-data-pipeline
+  cancel-in-progress: false
 
 jobs:
   tracked_check:
@@ -23,10 +24,23 @@ jobs:
           HIGH5_TELEGRAM_BOT_TOKEN: ${{ secrets.HIGH5_TELEGRAM_BOT_TOKEN }}
           HIGH5_TELEGRAM_CHAT_ID: ${{ secrets.HIGH5_TELEGRAM_CHAT_ID }}
         run: python scripts/tracked_check.py
-      - name: 결과 커밋
+      - name: 결과 커밋 (충돌 시 최대 3회 재시도)
         run: |
           git config user.name "high5-bot"
           git config user.email "high5-bot@users.noreply.github.com"
           git add data/
-          git diff --cached --quiet || git commit -m "추적목록 확인 결과 업데이트"
-          git push
+          if git diff --cached --quiet; then
+            echo "변경사항 없음, 커밋 생략"
+            exit 0
+          fi
+          git commit -m "추적목록 확인 결과 업데이트"
+          for i in 1 2 3; do
+            if git push; then
+              echo "push 성공"
+              exit 0
+            fi
+            echo "push 실패, pull --rebase 후 재시도 ($i/3)"
+            git pull --rebase origin main
+          done
+          echo "3회 재시도에도 push 실패"
+          exit 1
