@@ -33,7 +33,7 @@ import pandas as pd
 from common import (ATR_PERIOD, ENTRY_PERIOD, WATCH_RATIO, EXIT_PERIOD,
                      calc_atr, calc_hard_stop, check_high5_breakout, check_channel_exit,
                      detect_market, fetch_ohlc, fetch_current_price, fmt_num)
-from storage import gen_position_id, already_holding, POSITIONS_COLUMNS
+from storage import gen_position_id, already_holding, POSITIONS_COLUMNS, PAUSE_COLUMNS
 
 START_WORDS = ('추적시작',)
 STOP_WORDS = ('추적종료', '추적해제', '추적중지')
@@ -43,6 +43,14 @@ WATCH_CHECK_WORDS = ('관심확인', '관심목록')
 HELP_WORDS = ('명령어확인', '명령어 확인', '도움말', 'help')
 RESET_WORD = '보유종목 초기화'
 RESET_CONFIRM_WORD = '보유종목 초기화 확인'
+
+# "국장 추적일시정지" / "국장 추적재시작" (미장/코인도 동일 패턴)
+# ⚠️ 신규 신호 스캔/재확인/추적목록 확인만 멈추고, 이미 보유 중인 포지션의
+# 손절/하드스탑 감시(position_check.py)는 안전을 위해 계속 동작함.
+MARKET_NAME_TO_CODE = {'국장': 'KR', '미장': 'US', '코인': 'COIN'}
+MARKET_CODE_TO_NAME = {v: k for k, v in MARKET_NAME_TO_CODE.items()}
+PAUSE_SUFFIX = '추적일시정지'
+RESUME_SUFFIX = '추적재시작'
 
 
 def get_atr(market, code, period=ATR_PERIOD):
@@ -156,6 +164,33 @@ def handle_position_reset_confirm(pos_df):
         return pos_df, "현재 보유종목이 없어서 초기화할 게 없어요."
     new_df = pd.DataFrame(columns=POSITIONS_COLUMNS)
     return new_df, f"보유종목 {total}건을 전부 초기화했어요."
+
+
+# ===== 시장별 추적 일시정지/재시작 =====
+
+def handle_pause_market(market_code, pause_df):
+    market_name = MARKET_CODE_TO_NAME[market_code]
+    mask = pause_df['market'] == market_code
+    if mask.any() and str(pause_df.loc[mask, 'paused'].iloc[0]).strip().lower() in ('true', '1'):
+        return pause_df, f"{market_name}은 이미 추적 일시정지 상태예요."
+    if mask.any():
+        pause_df.loc[mask, 'paused'] = True
+    else:
+        new_row = {'market': market_code, 'paused': True}
+        pause_df = pd.concat([pause_df, pd.DataFrame([new_row])], ignore_index=True)
+    return pause_df, (f"{market_name} 추적을 일시정지했어요.\n"
+                       f"신규 전체스캔/재확인/추적목록 확인 알림이 멈춰요.\n"
+                       f"⚠️ 이미 보유 중인 포지션의 손절 감시는 안전을 위해 계속 동작해요.\n"
+                       f"재개하려면 '{market_name} {RESUME_SUFFIX}'을 입력해주세요.")
+
+
+def handle_resume_market(market_code, pause_df):
+    market_name = MARKET_CODE_TO_NAME[market_code]
+    mask = pause_df['market'] == market_code
+    if not mask.any() or str(pause_df.loc[mask, 'paused'].iloc[0]).strip().lower() not in ('true', '1'):
+        return pause_df, f"{market_name}은 이미 추적 중이에요 (일시정지 상태가 아니었어요)."
+    pause_df.loc[mask, 'paused'] = False
+    return pause_df, f"{market_name} 추적을 재개했어요. 신규 전체스캔/재확인/추적목록 확인이 다시 동작해요."
 
 
 def handle_position_check(pos_df):
@@ -328,27 +363,44 @@ def handle_help():
         "  추적목록을 지금 이 순간 실시간 재조회\n\n"
         "관심확인 (관심목록도 동일)\n"
         "  자동스캔 관심종목을 지금 이 순간 실시간 재조회\n\n"
+        "국장/미장/코인 추적일시정지\n"
+        "  해당 시장의 신규 전체스캔/재확인/추적목록 확인 알림을 멈춤\n"
+        "  (이미 보유 중인 포지션의 손절 감시는 안전을 위해 계속 동작)\n"
+        "국장/미장/코인 추적재시작\n"
+        "  일시정지 해제\n\n"
         "명령어확인 (도움말/help도 동일)"
     )
 
 
-def dispatch(text, pos_df, tracked_df, scan_df):
+def dispatch(text, pos_df, tracked_df, scan_df, pause_df):
     """명령어 텍스트 1개를 해석해서 처리한다.
-    반환값: (pos_df, tracked_df, reply_text_or_None, is_long_reply, pos_changed, tracked_changed)
+    반환값: (pos_df, tracked_df, pause_df, reply_text_or_None, is_long_reply,
+             pos_changed, tracked_changed, pause_changed)
     scan_df는 관심확인 조회 전용(읽기만 함, 변경/저장 없음)."""
     text = text.strip()
     if not text:
-        return pos_df, tracked_df, None, False, False, False
+        return pos_df, tracked_df, pause_df, None, False, False, False, False
 
     # ⚠️ 파괴적 명령이라 cmd 파싱 전에 전체 문장 그대로 먼저 매칭한다.
     if text == RESET_CONFIRM_WORD:
         pos_df, reply = handle_position_reset_confirm(pos_df)
-        return pos_df, tracked_df, reply, False, True, False
+        return pos_df, tracked_df, pause_df, reply, False, True, False, False
     if text == RESET_WORD:
         reply = handle_position_reset_request(pos_df)
-        return pos_df, tracked_df, reply, False, False, False
+        return pos_df, tracked_df, pause_df, reply, False, False, False, False
 
     parts = text.split()
+
+    # "국장/미장/코인 추적일시정지" / "추적재시작" — 정확히 두 단어일 때만 매칭
+    if len(parts) == 2 and parts[0] in MARKET_NAME_TO_CODE:
+        market_code = MARKET_NAME_TO_CODE[parts[0]]
+        if parts[1] == PAUSE_SUFFIX:
+            pause_df, reply = handle_pause_market(market_code, pause_df)
+            return pos_df, tracked_df, pause_df, reply, False, False, False, True
+        if parts[1] == RESUME_SUFFIX:
+            pause_df, reply = handle_resume_market(market_code, pause_df)
+            return pos_df, tracked_df, pause_df, reply, False, False, False, True
+
     cmd = parts[0].lower().lstrip('/')
     args = parts[1:]
 
@@ -383,26 +435,28 @@ def dispatch(text, pos_df, tracked_df, scan_df):
     elif text in HELP_WORDS or cmd == 'help':
         reply = handle_help()
 
-    return pos_df, tracked_df, reply, is_long, pos_changed, tracked_changed
+    return pos_df, tracked_df, pause_df, reply, is_long, pos_changed, tracked_changed, False
 
 
-def dispatch_lines(text, pos_df, tracked_df, scan_df):
+def dispatch_lines(text, pos_df, tracked_df, scan_df, pause_df):
     """여러 줄로 온 명령어를 줄 단위로 각각 처리하고 답장을 합쳐서 반환.
-    반환값: (pos_df, tracked_df, combined_reply, pos_changed, tracked_changed)"""
+    반환값: (pos_df, tracked_df, pause_df, combined_reply, pos_changed, tracked_changed, pause_changed)"""
     replies = []
     pos_changed_any = False
     tracked_changed_any = False
+    pause_changed_any = False
 
     for line in text.split('\n'):
         line = line.strip()
         if not line:
             continue
-        pos_df, tracked_df, reply, _is_long, pos_changed, tracked_changed = dispatch(
-            line, pos_df, tracked_df, scan_df)
+        pos_df, tracked_df, pause_df, reply, _is_long, pos_changed, tracked_changed, pause_changed = dispatch(
+            line, pos_df, tracked_df, scan_df, pause_df)
         if reply:
             replies.append(reply)
         pos_changed_any = pos_changed_any or pos_changed
         tracked_changed_any = tracked_changed_any or tracked_changed
+        pause_changed_any = pause_changed_any or pause_changed
 
     combined_reply = "\n\n".join(replies) if replies else None
-    return pos_df, tracked_df, combined_reply, pos_changed_any, tracked_changed_any
+    return pos_df, tracked_df, pause_df, combined_reply, pos_changed_any, tracked_changed_any, pause_changed_any
