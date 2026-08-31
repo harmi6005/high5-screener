@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from common import ATR_PERIOD, ENTRY_PERIOD, EXIT_PERIOD, WATCH_RATIO
 from common import check_high5_breakout, check_channel_exit, fetch_ohlc, fmt_num, notify_telegram
-from storage import load_tracked, save_tracked
+from storage import load_tracked, save_tracked, is_market_paused
 
 MIN_LEN = ENTRY_PERIOD * 2 + ATR_PERIOD + 5
 
@@ -38,6 +38,9 @@ if __name__ == "__main__":
 
     for idx, row in tracked_df.iterrows():
         code, market = row['code'], row['market']
+        if is_market_paused(market):
+            print(f"- {code} [{market}]: {market} 추적 일시정지 상태라 건너뜀")
+            continue
         df = fetch_ohlc(market, code, days=60)
         if df is None or len(df) < MIN_LEN:
             print(f"- {code} [{market}]: 데이터 조회 실패/부족, 이번 회차 건너뜀")
