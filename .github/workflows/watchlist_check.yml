@@ -1,8 +1,11 @@
 name: 관심종목 현황요약
 
+# ⚠️ schedule(GitHub 자체 cron) 트리거를 의도적으로 제거함.
+# cron-job.org가 5분마다 이 워크플로우의 workflow_dispatch를 GitHub API로 직접 호출하고
+# 있는데, 여기에 GitHub 자체 schedule('*/5 * * * *')까지 같이 켜져 있으면 두 트리거가
+# 각각 별도로 실행돼서 실질적으로 1~2분 간격처럼 중복 실행되는 문제가 있었음.
+# workflow_dispatch만 남겨서 cron-job.org의 5분 호출로만 돌게 함.
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
