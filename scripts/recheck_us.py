@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """미국 관심종목 재확인 (GitHub Actions에서 5분마다 자동 실행, 장중에만 동작)
-⚠️ 알림만 하며, 실제 매수/매도는 텔레그램 buy/sell 명령으로만 이뤄짐."""
+⚠️ 알림만 하며, 실제 매수/매도는 텔레그램 buy/sell 명령으로만 이뤄짐.
+
+⚠️ watchlist_check.py의 중복 시세조회를 없애기 위해, 재확인 과정에서 이미
+가져온 시세(res)를 재사용해서 '관심' 상태로 남은 종목의 현황요약까지 같이 보냄."""
 
 import sys
 import os
@@ -10,8 +13,9 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
-from common import (MAX_CHASE_RATIO, check_high5_system, notify_telegram,
-                     load_trade_history, save_trade_history, check_whipsaw, record_trade_result)
+from common import (MAX_CHASE_RATIO, check_high5_system, notify_telegram, send_long_message,
+                     fmt_num, trend_arrow, load_trade_history, save_trade_history,
+                     check_whipsaw, record_trade_result)
 from storage import load_scan, save_scan_for_market
 
 MARKET_LABEL = 'US'
@@ -26,6 +30,12 @@ def is_us_market_open():
     return dtime(9, 30) <= now.time() <= dtime(16, 0)
 
 
+def build_watch_tag(ratio):
+    if ratio is None or pd.isna(ratio):
+        return "❔ 데이터부족"
+    return "🔶 돌파임박" if ratio >= 0.99 else "🟢 관찰중"
+
+
 if __name__ == "__main__":
     if not is_us_market_open():
         print("미국 장 시간이 아니라서 재확인을 건너뜁니다 (평일 09:30~16:00 ET).")
@@ -33,6 +43,10 @@ if __name__ == "__main__":
 
     scan_df = load_scan()
     prev_df = scan_df[scan_df['market'] == MARKET_LABEL].copy()
+    for col in ['close', 'n_high', 'n_high_ratio', 'last_close']:
+        if col in prev_df.columns:
+            prev_df[col] = pd.to_numeric(prev_df[col], errors='coerce')
+
     target_rows = prev_df[prev_df['signal'].isin(['관심', '확정'])].to_dict('records')
     if not target_rows:
         print("현재 관심/확정 종목이 없습니다.")
@@ -95,6 +109,7 @@ if __name__ == "__main__":
     print(f"[미장 재확인] 확정 {len(confirm_df)}개 / 확정이탈 {len(exit_df)}개 / "
           f"휩쏘스킵 {whipsaw_skip_count}개 / 스킵(추격과다) {skip_cnt}개")
 
+    watch_lines = []
     for r in results:
         code, status = r['code'], r['status']
         mask = (prev_df['code'] == code)
@@ -112,6 +127,19 @@ if __name__ == "__main__":
                 hist_changed = True
             except (ValueError, TypeError):
                 pass
+        elif status == '유지':
+            old_last_close = prev_df.loc[mask, 'last_close']
+            old_val = float(old_last_close.iloc[0]) if not old_last_close.empty and pd.notna(old_last_close.iloc[0]) else None
+            arrow = trend_arrow(r['close'], old_val)
+            ratio = r.get('n_high_ratio')
+            tag = build_watch_tag(ratio)
+            ratio_str = f"{ratio*100:.1f}%" if ratio is not None and not pd.isna(ratio) else "N/A"
+            watch_lines.append(
+                f"- {r['name']} [US] {tag}\n"
+                f"  현재가 {fmt_num(r['close'])} {arrow} / 5일고가선 {fmt_num(r['n_high'])} ({ratio_str})"
+            )
+            prev_df.loc[mask, 'last_close'] = r['close']
+            prev_df.loc[mask, 'close'] = r['close']
 
     save_scan_for_market(MARKET_LABEL, prev_df)
     if hist_changed:
@@ -129,3 +157,7 @@ if __name__ == "__main__":
         lines = [f"- {r['name']}\n  현재가 {r['close']} / 3일저가(참고) {r['n_low']}"
                  for _, r in exit_df.iterrows()]
         notify_telegram("[미장] 확정이탈 종목! (보유 중이면 매도 검토)\n" + "\n".join(lines))
+
+    if watch_lines:
+        header = f"🎯 [관심종목 현황-미장] {len(watch_lines)}종목 (재확인과 통합, 알림 전용)"
+        send_long_message(header + "\n" + "\n".join(watch_lines))
