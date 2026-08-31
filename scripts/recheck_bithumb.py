@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import (MAX_CHASE_RATIO, check_high5_system, notify_telegram, send_long_message,
                      fmt_num, trend_arrow, load_trade_history, save_trade_history,
                      check_whipsaw, record_trade_result)
-from storage import load_scan, save_scan_for_market
+from storage import load_scan, save_scan_for_market, is_market_paused
 
 MAX_WORKERS = 10
 MARKET_LABEL = 'COIN'
@@ -68,6 +68,11 @@ def build_watch_tag(ratio):
 
 
 if __name__ == "__main__":
+    if is_market_paused('COIN'):
+        print("코인 추적이 일시정지 상태라서 재확인을 건너뜁니다. "
+              "'코인 추적재시작' 명령으로 재개할 수 있어요.")
+        sys.exit(0)
+
     scan_df = load_scan()
     prev_df = scan_df[scan_df['market'] == MARKET_LABEL].copy()
     for col in ['close', 'n_high', 'n_high_ratio', 'last_close']:
