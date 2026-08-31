@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import requests
 from common import send_long_message
-from storage import load_positions, save_positions, load_tracked, save_tracked, load_scan
+from storage import (load_positions, save_positions, load_tracked, save_tracked, load_scan,
+                      load_pause_state, save_pause_state)
 from bot_commands import dispatch_lines
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
@@ -67,9 +68,11 @@ if __name__ == "__main__":
     pos_df = load_positions()
     tracked_df = load_tracked()
     scan_df = load_scan()
+    pause_df = load_pause_state()
 
     pos_changed = False
     tracked_changed = False
+    pause_changed = False
     max_update_id = offset
 
     for update in updates:
@@ -86,10 +89,11 @@ if __name__ == "__main__":
             continue
 
         print(f"명령어 처리: {text}")
-        pos_df, tracked_df, reply, p_changed, t_changed = dispatch_lines(
-            text, pos_df, tracked_df, scan_df)
+        pos_df, tracked_df, pause_df, reply, p_changed, t_changed, pz_changed = dispatch_lines(
+            text, pos_df, tracked_df, scan_df, pause_df)
         pos_changed = pos_changed or p_changed
         tracked_changed = tracked_changed or t_changed
+        pause_changed = pause_changed or pz_changed
         if reply:
             send_long_message(reply)
 
@@ -98,5 +102,7 @@ if __name__ == "__main__":
         save_positions(pos_df)
     if tracked_changed:
         save_tracked(tracked_df)
+    if pause_changed:
+        save_pause_state(pause_df)
 
     print("명령어 처리 완료")
