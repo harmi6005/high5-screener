@@ -16,7 +16,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from common import (MAX_CHASE_RATIO, TOP_PICKS_COUNT, check_high5_system, notify_telegram,
                      send_long_message, build_watch_summary, pick_top_entries)
-from storage import save_scan_for_market
+from storage import save_scan_for_market, is_market_paused
 
 MARKET_LABEL = 'US'
 
@@ -40,6 +40,11 @@ def build_top_picks_message(top_entries, entry_cnt):
 
 
 if __name__ == "__main__":
+    if is_market_paused('US'):
+        print("미장 추적이 일시정지 상태라서 전체스캔을 건너뜁니다. "
+              "'미장 추적재시작' 명령으로 재개할 수 있어요.")
+        sys.exit(0)
+
     print("[미장 5일신고가] S&P500 종목 리스트 불러오는 중...")
     tickers = get_sp500_tickers()
     print(f"총 {len(tickers)}개 종목 배치 다운로드 중...")
