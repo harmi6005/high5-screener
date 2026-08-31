@@ -135,3 +135,42 @@ def load_tracked():
 def save_tracked(df):
     os.makedirs(DATA_DIR, exist_ok=True)
     df.to_csv(TRACKED_PATH, index=False, encoding='utf-8-sig')
+
+
+# ===== 4. 시장별 추적 일시정지 상태 (pause_state.csv) =====
+# 텔레그램 "국장/미장/코인 추적일시정지"·"추적재시작" 명령으로 조작.
+# ⚠️ 이 플래그는 신규 신호 스캔(full_scan_*)/재확인(recheck_*)/추적목록 확인
+# (tracked_check)만 건너뛰게 하고, 이미 보유 중인 포지션의 손절/하드스탑 감시
+# (position_check.py)는 안전을 위해 절대 건드리지 않는다 — 추적을 멈춘다고
+# 이미 산 종목의 위험관리까지 꺼지면 위험하기 때문.
+PAUSE_PATH = os.path.join(DATA_DIR, 'pause_state.csv')
+PAUSE_COLUMNS = ['market', 'paused']
+
+
+def load_pause_state():
+    if os.path.exists(PAUSE_PATH):
+        df = pd.read_csv(PAUSE_PATH, dtype={'market': str})
+        for col in PAUSE_COLUMNS:
+            if col not in df.columns:
+                df[col] = False
+        return df[PAUSE_COLUMNS]
+    return pd.DataFrame(columns=PAUSE_COLUMNS)
+
+
+def save_pause_state(df):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    df.to_csv(PAUSE_PATH, index=False, encoding='utf-8-sig')
+
+
+def is_market_paused(market, pause_df=None):
+    """스캔/재확인 스크립트 시작 시점에 호출해서 해당 시장이 일시정지 상태인지 확인.
+    pause_df를 안 넘기면 파일에서 직접 읽는다 (스캔 스크립트들은 이 방식으로 간단히 사용)."""
+    if pause_df is None:
+        pause_df = load_pause_state()
+    if pause_df.empty:
+        return False
+    row = pause_df[pause_df['market'] == market]
+    if row.empty:
+        return False
+    val = row.iloc[0]['paused']
+    return str(val).strip().lower() in ('true', '1')
