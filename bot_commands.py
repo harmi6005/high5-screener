@@ -10,6 +10,7 @@ telegram_listener.py(폴링, 5분마다)와 webhook_handler.py(웹훅, 즉시)�
 - buy 코드 매수가
 - sell 거래번호 [매도가]
 - list
+- 보유종목 초기화 / 보유종목 초기화 확인  ← 신규, 2단계 확인 (아래 참고)
 - 코드 추적시작
 - 코드 추적종료 (추적해제/추적중지도 동일)
 - 추적확인 (추적목록도 동일)
@@ -19,6 +20,11 @@ telegram_listener.py(폴링, 5분마다)와 webhook_handler.py(웹훅, 즉시)�
 
 포지션확인/관심확인은 5분 자동요약과 달리 장중/장마감 시간대와 무관하게
 호출 즉시 현재가를 재조회해서 보여준다 (읽기 전용, CSV에 아무것도 안 씀).
+
+⚠️ "보유종목 초기화"는 positions.csv를 통째로 비우는 되돌릴 수 없는 작업이라
+2단계 확인으로 구현함:
+  1) "보유종목 초기화" 입력 -> 현재 건수만 알려주고 아무것도 안 지움
+  2) "보유종목 초기화 확인" 입력 -> 이때 비로소 전부 삭제
 """
 
 from datetime import datetime
@@ -27,7 +33,7 @@ import pandas as pd
 from common import (ATR_PERIOD, ENTRY_PERIOD, WATCH_RATIO, EXIT_PERIOD,
                      calc_atr, calc_hard_stop, check_high5_breakout, check_channel_exit,
                      detect_market, fetch_ohlc, fetch_current_price, fmt_num)
-from storage import gen_position_id, already_holding
+from storage import gen_position_id, already_holding, POSITIONS_COLUMNS
 
 START_WORDS = ('추적시작',)
 STOP_WORDS = ('추적종료', '추적해제', '추적중지')
@@ -35,6 +41,8 @@ TRACK_CHECK_WORDS = ('추적확인', '추적목록')
 POSITION_CHECK_WORDS = ('포지션확인', '포지션목록', '보유확인')
 WATCH_CHECK_WORDS = ('관심확인', '관심목록')
 HELP_WORDS = ('명령어확인', '명령어 확인', '도움말', 'help')
+RESET_WORD = '보유종목 초기화'
+RESET_CONFIRM_WORD = '보유종목 초기화 확인'
 
 
 def get_atr(market, code, period=ATR_PERIOD):
@@ -128,6 +136,26 @@ def handle_list(pos_df):
                       f"매수 {fmt_num(r['entry_price'])} / 최고가 {fmt_num(r['highest_price'])} / "
                       f"하드스탑 {fmt_num(r['hard_stop_price'])} / {r['last_milestone']}배 수익 도달")
     return "\n".join(lines)
+
+
+def handle_position_reset_request(pos_df):
+    """1단계: 실제로 지우지 않고 현재 건수만 알려주며 확인을 요구한다."""
+    total = len(pos_df)
+    if total == 0:
+        return "현재 보유종목이 없어서 초기화할 게 없어요."
+    active_cnt = len(pos_df[pos_df['status'] != 'closed_manual'])
+    return (f"현재 보유종목이 총 {total}건 있어요 (활성 {active_cnt}건 포함).\n"
+            f"⚠️ 전부 삭제되며 되돌릴 수 없어요.\n"
+            f"정말 초기화하려면 '{RESET_CONFIRM_WORD}'을(를) 다시 입력해주세요.")
+
+
+def handle_position_reset_confirm(pos_df):
+    """2단계: 실제 삭제. positions.csv를 빈 상태(헤더만)로 되돌린다."""
+    total = len(pos_df)
+    if total == 0:
+        return pos_df, "현재 보유종목이 없어서 초기화할 게 없어요."
+    new_df = pd.DataFrame(columns=POSITIONS_COLUMNS)
+    return new_df, f"보유종목 {total}건을 전부 초기화했어요."
 
 
 def handle_position_check(pos_df):
@@ -288,6 +316,10 @@ def handle_help():
         "  예) sell 4821 또는 sell 4821 73000\n\n"
         "list\n"
         "  현재 감시 중인 거래 목록 (등록된 값 기준)\n\n"
+        "보유종목 초기화\n"
+        "  보유종목 전체 삭제 (되돌릴 수 없음, 2단계 확인 필요)\n"
+        "  1) '보유종목 초기화' 입력 -> 현재 건수 안내만 됨\n"
+        "  2) '보유종목 초기화 확인' 입력 -> 이때 실제로 전부 삭제\n\n"
         "포지션확인 (포지션목록/보유확인도 동일)\n"
         "  보유종목을 지금 이 순간 실시간 재조회\n\n"
         "코드 추적시작 (예: 005930 추적시작)\n"
@@ -307,6 +339,14 @@ def dispatch(text, pos_df, tracked_df, scan_df):
     text = text.strip()
     if not text:
         return pos_df, tracked_df, None, False, False, False
+
+    # ⚠️ 파괴적 명령이라 cmd 파싱 전에 전체 문장 그대로 먼저 매칭한다.
+    if text == RESET_CONFIRM_WORD:
+        pos_df, reply = handle_position_reset_confirm(pos_df)
+        return pos_df, tracked_df, reply, False, True, False
+    if text == RESET_WORD:
+        reply = handle_position_reset_request(pos_df)
+        return pos_df, tracked_df, reply, False, False, False
 
     parts = text.split()
     cmd = parts[0].lower().lstrip('/')
