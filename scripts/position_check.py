@@ -11,6 +11,10 @@
 - 매 실행마다 활성(비청산) 포지션 전체 현황을 무조건 요약 발송 (📦)
 
 status 값: active(감시중) / stop_hit(매도검토 알림 나감, 여전히 감시중) / closed_manual(sell로 종료)
+
+※ 요약의 현재가 옆 상승/하락/보합 표시(🔴▲/🔵▼/🟡➖)는 "매수가(entry_price)" 기준입니다.
+   (예전 버전은 직전 5분 체크 가격(last_price) 기준이었으나, 장 시작 시 사실상 전일 가격과
+   비교되는 문제가 있어 매수가 기준으로 변경함. last_price 컬럼 자체는 참고용으로 계속 저장함.)
 """
 
 import sys
@@ -133,7 +137,6 @@ if __name__ == "__main__":
         entry_price = row['entry_price']
         hard_stop_price = row['hard_stop_price']
         highest_price = row['highest_price']
-        prev_close = row['last_price']
         prev_n_low = row['last_n_low']
         status = row['status'] if row['status'] else 'active'
 
@@ -194,7 +197,8 @@ if __name__ == "__main__":
 
         # ===== 요약용 표시값 조립 =====
         tag = build_status_tag(today_close, hard_stop_price, status)
-        arrow = trend_arrow(today_close, prev_close)
+        # 상승/하락/보합 표시는 "매수가" 기준 (예전: 직전 5분 체크가(last_price) 기준)
+        arrow = trend_arrow(today_close, entry_price)
         n_low_arrow = trend_arrow(n_low, prev_n_low) if n_low is not None else "N/A"
         n_low_str = fmt_num(n_low) if n_low is not None else "N/A"
         pnl_pct = (today_close - entry_price) / entry_price * 100
@@ -208,6 +212,7 @@ if __name__ == "__main__":
             f"  하드스탑 {fmt_num(hard_stop_price)} (남은거리 {fmt_pct(hard_stop_dist_pct)})"
         )
 
+        # last_price는 표시 계산에는 더 이상 쓰이지 않지만, 참고/향후 용도로 계속 기록
         df.at[idx, 'last_price'] = float(today_close)
         if n_low is not None:
             df.at[idx, 'last_n_low'] = float(n_low)
